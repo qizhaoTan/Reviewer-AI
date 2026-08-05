@@ -51,4 +51,5 @@ type ToolDefinition struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
+	Force       bool        `json:"-"`            // 强制本次 Provider 使用该工具
 }
