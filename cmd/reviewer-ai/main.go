@@ -87,27 +87,29 @@ func main() {
 		}
 
 		for _, tc := range resp.ToolCalls {
-			var out string
-			var isError bool
+			var result tool.Result
 			switch tc.Name {
 			case "read_file":
-				out, isError = tool.ReadFile(repoAbs, tc.Arguments)
+				result = tool.ReadFile(repoAbs, tc.Arguments)
 			case "glob":
-				out, isError = tool.Glob(repoAbs, tc.Arguments)
+				result = tool.Glob(repoAbs, tc.Arguments)
 			case "grep":
-				out, isError = tool.Grep(repoAbs, tc.Arguments)
+				result = tool.Grep(repoAbs, tc.Arguments)
 			default:
-				out, isError = fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name), true
+				result = tool.Result{
+					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),
+					IsError: true,
+				}
 			}
 
-			if isError {
-				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 失败 %s\n", tc.Name, tc.Arguments, out)
+			if result.IsError {
+				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 失败 %s\n", tc.Name, tc.Arguments, result.Output)
 			} else {
-				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 成功 len %d\n", tc.Name, tc.Arguments, len(out))
+				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 成功 len %d\n", tc.Name, tc.Arguments, len(result.Output))
 			}
 			msgs = append(msgs, schema.Message{
 				Role:       schema.RoleUser,
-				Content:    out,
+				Content:    result.Output,
 				ToolCallID: tc.ID,
 			})
 		}

@@ -155,13 +155,13 @@ func TestGrep(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal GrepInput: %v", err)
 			}
-			out, isError := Grep(root, b)
-			if isError != tt.wantIsError {
-				t.Fatalf("Grep() isError = %v, want %v (output: %s)", isError, tt.wantIsError, out)
+			result := Grep(root, b)
+			if result.IsError != tt.wantIsError {
+				t.Fatalf("Grep() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}
 			for _, want := range tt.outputContain {
-				if !strings.Contains(out, want) {
-					t.Errorf("output does not contain %q:\n%s", want, out)
+				if !strings.Contains(result.Output, want) {
+					t.Errorf("output does not contain %q:\n%s", want, result.Output)
 				}
 			}
 		})
@@ -170,9 +170,9 @@ func TestGrep(t *testing.T) {
 
 func TestGrep_MalformedArguments(t *testing.T) {
 	root := t.TempDir()
-	out, isError := Grep(root, json.RawMessage(`{not valid json`))
-	if !isError {
-		t.Fatalf("Grep() isError = false, want true (output: %s)", out)
+	result := Grep(root, json.RawMessage(`{not valid json`))
+	if !result.IsError {
+		t.Fatalf("Grep() isError = false, want true (output: %s)", result.Output)
 	}
 }
 

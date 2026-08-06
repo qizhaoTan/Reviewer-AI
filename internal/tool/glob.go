@@ -40,10 +40,10 @@ func GlobDefinition() schema.ToolDefinition {
 
 // Glob 执行一次 glob 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 有 ripgrep 时优先调用它（更快，原生尊重 .gitignore）；否则回退到标准库遍历实现。
-func Glob(repoRoot string, args json.RawMessage) (string, bool) {
+func Glob(repoRoot string, args json.RawMessage) Result {
 	var input GlobInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return fmt.Sprintf("glob arguments are not valid JSON (%v). Call glob again with a JSON object like {\"pattern\": \"**/*.go\"}.", err), true
+		return Result{Output: fmt.Sprintf("glob arguments are not valid JSON (%v). Call glob again with a JSON object like {\"pattern\": \"**/*.go\"}.", err), IsError: true}
 	}
 	pattern := input.Pattern
 	if pattern == "" {
@@ -60,11 +60,11 @@ func Glob(repoRoot string, args json.RawMessage) (string, bool) {
 		paths, err = globWithStdlib(repoRoot, pattern)
 	}
 	if err != nil {
-		return fmt.Sprintf("glob: %v. Check that the pattern is valid (e.g. \"**/*.go\", \"internal/*.go\") and retry.", err), true
+		return Result{Output: fmt.Sprintf("glob: %v. Check that the pattern is valid (e.g. \"**/*.go\", \"internal/*.go\") and retry.", err), IsError: true}
 	}
 
 	if len(paths) == 0 {
-		return fmt.Sprintf("glob: no files matched pattern %q.", pattern), false
+		return Result{Output: fmt.Sprintf("glob: no files matched pattern %q.", pattern)}
 	}
 
 	sort.Strings(paths)
@@ -83,7 +83,7 @@ func Glob(repoRoot string, args json.RawMessage) (string, bool) {
 	if truncated {
 		fmt.Fprintf(&b, "... [result limit of %d reached; narrow the pattern to see more, e.g. add a subdirectory prefix]\n", maxGlobResults)
 	}
-	return strings.TrimRight(b.String(), "\n"), false
+	return Result{Output: strings.TrimRight(b.String(), "\n")}
 }
 
 // globWithRipgrep 用 `rg --files --glob <pattern>` 列出匹配的文件，返回相对 repoRoot 的路径。

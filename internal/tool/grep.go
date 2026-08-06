@@ -65,20 +65,20 @@ func GrepDefinition() schema.ToolDefinition {
 
 // Grep 执行一次 grep 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 有 ripgrep 时优先调用它；否则回退到标准库 regexp + 逐文件扫描的实现。
-func Grep(repoRoot string, args json.RawMessage) (string, bool) {
+func Grep(repoRoot string, args json.RawMessage) Result {
 	var input GrepInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return fmt.Sprintf("grep arguments are not valid JSON (%v). Call grep again with a JSON object like {\"pattern\": \"func Foo\"}.", err), true
+		return Result{Output: fmt.Sprintf("grep arguments are not valid JSON (%v). Call grep again with a JSON object like {\"pattern\": \"func Foo\"}.", err), IsError: true}
 	}
 	if input.Pattern == "" {
-		return "grep: pattern must not be empty. Provide a regular expression to search for, e.g. {\"pattern\": \"func Foo\"}.", true
+		return Result{Output: "grep: pattern must not be empty. Provide a regular expression to search for, e.g. {\"pattern\": \"func Foo\"}.", IsError: true}
 	}
 	mode := input.OutputMode
 	if mode == "" {
 		mode = outputModeFilesWithMatches
 	}
 	if mode != outputModeFilesWithMatches && mode != outputModeContent {
-		return fmt.Sprintf("grep: output_mode %q is not supported. Use %q or %q.", mode, outputModeFilesWithMatches, outputModeContent), true
+		return Result{Output: fmt.Sprintf("grep: output_mode %q is not supported. Use %q or %q.", mode, outputModeFilesWithMatches, outputModeContent), IsError: true}
 	}
 
 	var (
@@ -91,14 +91,14 @@ func Grep(repoRoot string, args json.RawMessage) (string, bool) {
 		matches, err = grepWithStdlib(repoRoot, input.Pattern, input.Glob, mode)
 	}
 	if err != nil {
-		return fmt.Sprintf("grep: %v. Check that pattern is a valid regular expression and glob (if provided) is a valid filename pattern, then retry.", err), true
+		return Result{Output: fmt.Sprintf("grep: %v. Check that pattern is a valid regular expression and glob (if provided) is a valid filename pattern, then retry.", err), IsError: true}
 	}
 
 	if len(matches) == 0 {
-		return fmt.Sprintf("grep: no matches for pattern %q.", input.Pattern), false
+		return Result{Output: fmt.Sprintf("grep: no matches for pattern %q.", input.Pattern)}
 	}
 
-	return renderGrepMatches(input.Pattern, matches, mode), false
+	return Result{Output: renderGrepMatches(input.Pattern, matches, mode)}
 }
 
 // grepMatch 是一次匹配的统一表示：files_with_matches 模式下 Line/Text 为空。

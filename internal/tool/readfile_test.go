@@ -192,13 +192,13 @@ func TestReadFile(t *testing.T) {
 			root := t.TempDir()
 			args := tt.arrange(t, root)
 
-			output, isError := ReadFile(root, args)
-			if isError != tt.wantIsError {
-				t.Fatalf("ReadFile() isError = %v, want %v (output: %s)", isError, tt.wantIsError, output)
+			result := ReadFile(root, args)
+			if result.IsError != tt.wantIsError {
+				t.Fatalf("ReadFile() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}
 			for _, want := range tt.outputContain {
-				if !strings.Contains(output, want) {
-					t.Errorf("output does not contain %q:\n%s", want, output)
+				if !strings.Contains(result.Output, want) {
+					t.Errorf("output does not contain %q:\n%s", want, result.Output)
 				}
 			}
 		})

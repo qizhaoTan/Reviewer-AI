@@ -143,13 +143,13 @@ func TestGlob(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal GlobInput: %v", err)
 			}
-			out, isError := Glob(root, b)
-			if isError != tt.wantIsError {
-				t.Fatalf("Glob() isError = %v, want %v (output: %s)", isError, tt.wantIsError, out)
+			result := Glob(root, b)
+			if result.IsError != tt.wantIsError {
+				t.Fatalf("Glob() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}
 			for _, want := range tt.outputContain {
-				if !strings.Contains(out, want) {
-					t.Errorf("output does not contain %q:\n%s", want, out)
+				if !strings.Contains(result.Output, want) {
+					t.Errorf("output does not contain %q:\n%s", want, result.Output)
 				}
 			}
 		})
@@ -158,9 +158,9 @@ func TestGlob(t *testing.T) {
 
 func TestGlob_MalformedArguments(t *testing.T) {
 	root := t.TempDir()
-	out, isError := Glob(root, json.RawMessage(`{not valid json`))
-	if !isError {
-		t.Fatalf("Glob() isError = false, want true (output: %s)", out)
+	result := Glob(root, json.RawMessage(`{not valid json`))
+	if !result.IsError {
+		t.Fatalf("Glob() isError = false, want true (output: %s)", result.Output)
 	}
 }
 
@@ -171,11 +171,11 @@ func TestGlob_ResultLimitTruncates(t *testing.T) {
 	}
 
 	b, _ := json.Marshal(GlobInput{Pattern: "*.go"})
-	out, isError := Glob(root, b)
-	if isError {
-		t.Fatalf("Glob() isError = true, want false (output: %s)", out)
+	result := Glob(root, b)
+	if result.IsError {
+		t.Fatalf("Glob() isError = true, want false (output: %s)", result.Output)
 	}
-	if !strings.Contains(out, "result limit") {
-		t.Errorf("expected truncation notice in output:\n%s", out)
+	if !strings.Contains(result.Output, "result limit") {
+		t.Errorf("expected truncation notice in output:\n%s", result.Output)
 	}
 }
