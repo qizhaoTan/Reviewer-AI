@@ -115,7 +115,6 @@ func translateOpenAIMessage(msgs []schema.Message) []openai.ChatCompletionMessag
 		switch msg.Role {
 		case schema.RoleSystem:
 			openaiMsgs = append(openaiMsgs, openai.SystemMessage(msg.Content))
-
 		case schema.RoleUser:
 			if msg.ToolCallID != "" {
 				// 注意：v3 新版参数顺序是 (content, toolCallID)
@@ -123,7 +122,6 @@ func translateOpenAIMessage(msgs []schema.Message) []openai.ChatCompletionMessag
 			} else {
 				openaiMsgs = append(openaiMsgs, openai.UserMessage(msg.Content))
 			}
-
 		case schema.RoleAssistant:
 			astParam := openai.ChatCompletionAssistantMessageParam{}
 			if msg.Content != "" {
@@ -159,9 +157,9 @@ func translateOpenAIMessage(msgs []schema.Message) []openai.ChatCompletionMessag
 }
 
 // 翻译工具定义 (v3 新 API 特性适配)
-func translateOpenAITools(availableTools []schema.ToolDefinition) ([]openai.ChatCompletionToolUnionParam, openai.ChatCompletionToolChoiceOptionUnionParam) {
-	openaiTools := make([]openai.ChatCompletionToolUnionParam, 0, len(availableTools))
-	for _, toolDef := range availableTools {
+func translateOpenAITools(tools []schema.ToolDefinition) ([]openai.ChatCompletionToolUnionParam, openai.ChatCompletionToolChoiceOptionUnionParam) {
+	openaiTools := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
+	for _, toolDef := range tools {
 		var params shared.FunctionParameters
 
 		// 尝试直接断言，如果不成功则通过 JSON 往返序列化来保证类型匹配
@@ -183,7 +181,7 @@ func translateOpenAITools(availableTools []schema.ToolDefinition) ([]openai.Chat
 	}
 
 	var toolChoice openai.ChatCompletionToolChoiceOptionUnionParam
-	for _, toolDef := range availableTools {
+	for _, toolDef := range tools {
 		if toolDef.Force {
 			// 强制调用工具
 			toolChoice = openai.ToolChoiceOptionFunctionToolChoice(
