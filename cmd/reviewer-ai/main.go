@@ -9,6 +9,7 @@ import (
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/config"
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
+	"github.com/qizhaoTan/Reviewer-AI/internal/log"
 	"github.com/qizhaoTan/Reviewer-AI/internal/prompt"
 	"github.com/qizhaoTan/Reviewer-AI/internal/provider"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
@@ -19,6 +20,7 @@ import (
 const maxToolLoopIterations = 30
 
 func main() {
+	log.InitDebug()
 	configPath := flag.String("config", "", "path to config.json (default: ~/.reviewer/config.json or $REVIEWER_AI_CONFIG)")
 	repoDir := flag.String("repo", ".", "path to the git repository to review")
 	flag.Parse()
@@ -82,7 +84,7 @@ func main() {
 		}
 
 		for _, tc := range resp.ToolCalls {
-			fmt.Fprintf(os.Stdout, "reviewer-ai: 尝试调用工具 %s(%s)\n", tc.Name, tc.Arguments)
+			log.Info("尝试调用工具", "tool", tc.Name, "arguments", tc.Arguments)
 		}
 
 		for _, tc := range resp.ToolCalls {
@@ -102,9 +104,9 @@ func main() {
 			}
 
 			if result.IsError {
-				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 失败 %s\n", tc.Name, tc.Arguments, result.Output)
+				log.Error("调用工具失败", "tool", tc.Name, "arguments", tc.Arguments, "output", result.Output)
 			} else {
-				fmt.Fprintf(os.Stdout, "reviewer-ai: 调用工具%s(%s) 成功 len %d\n", tc.Name, tc.Arguments, len(result.Output))
+				log.Info("调用工具成功", "tool", tc.Name, "arguments", tc.Arguments, "outputLen", len(result.Output))
 			}
 			msgs = append(msgs, schema.Message{
 				Role:       schema.RoleUser,
@@ -118,6 +120,6 @@ func main() {
 }
 
 func fail(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "reviewer-ai: "+format+"\n", args...)
+	log.Error(fmt.Sprintf(format, args...))
 	os.Exit(1)
 }
