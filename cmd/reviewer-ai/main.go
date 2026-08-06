@@ -61,7 +61,11 @@ func main() {
 	}
 
 	msgs := prompt.BuildInitial(changes)
-	tools := []schema.ToolDefinition{tool.ReadFileDefinition()}
+	tools := []schema.ToolDefinition{
+		tool.ReadFileDefinition(),
+		tool.GlobDefinition(),
+		tool.GrepDefinition(),
+	}
 
 	genCtx, cancel := context.WithTimeout(ctx, modelCfg.Timeout())
 	defer cancel()
@@ -88,6 +92,10 @@ func main() {
 			switch tc.Name {
 			case "read_file":
 				out, isError = tool.ReadFile(repoAbs, tc.Arguments)
+			case "glob":
+				out, isError = tool.Glob(repoAbs, tc.Arguments)
+			case "grep":
+				out, isError = tool.Grep(repoAbs, tc.Arguments)
 			default:
 				out, isError = fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name), true
 			}
