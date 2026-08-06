@@ -23,13 +23,12 @@ func main() {
 	repoDir := flag.String("repo", ".", "path to the git repository to review")
 	flag.Parse()
 
-	ctx := context.Background()
-
 	repoAbs, err := filepath.Abs(*repoDir)
 	if err != nil {
 		fail("resolve repo path: %v", err)
 	}
 
+	ctx := context.Background()
 	changes, err := gitdiff.LoadStaged(ctx, repoAbs)
 	if err != nil {
 		fail("load staged changes: %v", err)
@@ -90,11 +89,11 @@ func main() {
 			var result tool.Result
 			switch tc.Name {
 			case "read_file":
-				result = tool.ReadFile(repoAbs, tc.Arguments)
+				result = tool.ReadFile(ctx, repoAbs, tc.Arguments)
 			case "glob":
-				result = tool.Glob(repoAbs, tc.Arguments)
+				result = tool.Glob(ctx, repoAbs, tc.Arguments)
 			case "grep":
-				result = tool.Grep(repoAbs, tc.Arguments)
+				result = tool.Grep(ctx, repoAbs, tc.Arguments)
 			default:
 				result = tool.Result{
 					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),

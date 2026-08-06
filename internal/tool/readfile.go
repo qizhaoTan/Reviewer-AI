@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -56,7 +57,7 @@ func ReadFileDefinition() schema.ToolDefinition {
 // ReadFile 执行一次 read_file 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 返回的 Result.IsError 为 true 时 Output 是可读的错误说明，
 // 供模型据此自我纠正（如换一个路径重试），而不是让整个审查流程崩溃。
-func ReadFile(repoRoot string, args json.RawMessage) Result {
+func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input ReadFileInput
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{Output: fmt.Sprintf("read_file arguments are not valid JSON (%v). Call read_file again with a JSON object like {\"path\": \"relative/path.go\"}.", err), IsError: true}

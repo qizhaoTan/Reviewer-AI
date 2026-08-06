@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -192,7 +193,7 @@ func TestReadFile(t *testing.T) {
 			root := t.TempDir()
 			args := tt.arrange(t, root)
 
-			result := ReadFile(root, args)
+			result := ReadFile(context.Background(), root, args)
 			if result.IsError != tt.wantIsError {
 				t.Fatalf("ReadFile() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}

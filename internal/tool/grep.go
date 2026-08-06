@@ -65,7 +65,7 @@ func GrepDefinition() schema.ToolDefinition {
 
 // Grep 执行一次 grep 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 有 ripgrep 时优先调用它；否则回退到标准库 regexp + 逐文件扫描的实现。
-func Grep(repoRoot string, args json.RawMessage) Result {
+func Grep(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input GrepInput
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{Output: fmt.Sprintf("grep arguments are not valid JSON (%v). Call grep again with a JSON object like {\"pattern\": \"func Foo\"}.", err), IsError: true}

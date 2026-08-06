@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -143,7 +144,7 @@ func TestGlob(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal GlobInput: %v", err)
 			}
-			result := Glob(root, b)
+			result := Glob(context.Background(), root, b)
 			if result.IsError != tt.wantIsError {
 				t.Fatalf("Glob() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}
@@ -158,7 +159,7 @@ func TestGlob(t *testing.T) {
 
 func TestGlob_MalformedArguments(t *testing.T) {
 	root := t.TempDir()
-	result := Glob(root, json.RawMessage(`{not valid json`))
+	result := Glob(context.Background(), root, json.RawMessage(`{not valid json`))
 	if !result.IsError {
 		t.Fatalf("Glob() isError = false, want true (output: %s)", result.Output)
 	}
@@ -171,7 +172,7 @@ func TestGlob_ResultLimitTruncates(t *testing.T) {
 	}
 
 	b, _ := json.Marshal(GlobInput{Pattern: "*.go"})
-	result := Glob(root, b)
+	result := Glob(context.Background(), root, b)
 	if result.IsError {
 		t.Fatalf("Glob() isError = true, want false (output: %s)", result.Output)
 	}

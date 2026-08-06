@@ -40,7 +40,7 @@ func GlobDefinition() schema.ToolDefinition {
 
 // Glob 执行一次 glob 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 有 ripgrep 时优先调用它（更快，原生尊重 .gitignore）；否则回退到标准库遍历实现。
-func Glob(repoRoot string, args json.RawMessage) Result {
+func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input GlobInput
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{Output: fmt.Sprintf("glob arguments are not valid JSON (%v). Call glob again with a JSON object like {\"pattern\": \"**/*.go\"}.", err), IsError: true}

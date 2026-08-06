@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -155,7 +156,7 @@ func TestGrep(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal GrepInput: %v", err)
 			}
-			result := Grep(root, b)
+			result := Grep(context.Background(), root, b)
 			if result.IsError != tt.wantIsError {
 				t.Fatalf("Grep() isError = %v, want %v (output: %s)", result.IsError, tt.wantIsError, result.Output)
 			}
@@ -170,7 +171,7 @@ func TestGrep(t *testing.T) {
 
 func TestGrep_MalformedArguments(t *testing.T) {
 	root := t.TempDir()
-	result := Grep(root, json.RawMessage(`{not valid json`))
+	result := Grep(context.Background(), root, json.RawMessage(`{not valid json`))
 	if !result.IsError {
 		t.Fatalf("Grep() isError = false, want true (output: %s)", result.Output)
 	}
