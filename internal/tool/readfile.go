@@ -59,7 +59,7 @@ func ReadFileDefinition() schema.ToolDefinition {
 func ReadFile(repoRoot string, args json.RawMessage) (string, bool) {
 	var input ReadFileInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return fmt.Sprintf("invalid read_file arguments: %v", err), true
+		return fmt.Sprintf("read_file arguments are not valid JSON (%v). Call read_file again with a JSON object like {\"path\": \"relative/path.go\"}.", err), true
 	}
 
 	resolved, err := resolveWithinRoot(repoRoot, input.Path)
@@ -68,25 +68,28 @@ func ReadFile(repoRoot string, args json.RawMessage) (string, bool) {
 	}
 
 	info, err := os.Stat(resolved)
+	if os.IsNotExist(err) {
+		return fmt.Sprintf("read_file: %q does not exist in the repository. Double-check the path (it must be relative to the repo root, e.g. \"internal/foo/bar.go\") and retry.", input.Path), true
+	}
 	if err != nil {
-		return fmt.Sprintf("read_file: %v", err), true
+		return fmt.Sprintf("read_file: could not stat %q (%v). Try a different path.", input.Path, err), true
 	}
 	if info.IsDir() {
-		return fmt.Sprintf("read_file: %q is a directory, not a file", input.Path), true
+		return fmt.Sprintf("read_file: %q is a directory, not a file. Provide the path to a specific file inside it instead.", input.Path), true
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Sprintf("read_file: %q is not a regular file", input.Path), true
+		return fmt.Sprintf("read_file: %q is not a regular file (e.g. a device or socket) and cannot be read. Choose a different path.", input.Path), true
 	}
 	if info.Size() > maxReadBytes {
-		return fmt.Sprintf("read_file: %q is too large (%d bytes, limit %d)", input.Path, info.Size(), maxReadBytes), true
+		return fmt.Sprintf("read_file: %q is %d bytes, which exceeds the %d byte limit. Re-request it with start_line/end_line to read a smaller slice instead of the whole file.", input.Path, info.Size(), maxReadBytes), true
 	}
 
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return fmt.Sprintf("read_file: %v", err), true
+		return fmt.Sprintf("read_file: could not read %q (%v). Try a different path.", input.Path, err), true
 	}
 	if isBinary(data) {
-		return fmt.Sprintf("read_file: %q appears to be a binary file", input.Path), true
+		return fmt.Sprintf("read_file: %q appears to be a binary file and cannot be shown as text. Skip it or pick a different, text-based file.", input.Path), true
 	}
 
 	return renderLines(input.Path, data, input.StartLine, input.EndLine)
@@ -95,19 +98,19 @@ func ReadFile(repoRoot string, args json.RawMessage) (string, bool) {
 // resolveWithinRoot 把 repo 相对路径解析为绝对路径，并确保结果不逃逸出 root。
 func resolveWithinRoot(root, path string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("read_file: path must not be empty")
+		return "", fmt.Errorf("read_file: path must not be empty. Provide a repo-relative file path, e.g. \"internal/foo/bar.go\".")
 	}
 	if strings.ContainsRune(path, 0) {
-		return "", fmt.Errorf("read_file: path contains a NUL byte")
+		return "", fmt.Errorf("read_file: path %q contains a NUL byte, which is not a valid file path. Provide a plain repo-relative path.", path)
 	}
 	if filepath.IsAbs(path) {
-		return "", fmt.Errorf("read_file: path must be repo-relative, got absolute path %q", path)
+		return "", fmt.Errorf("read_file: path %q is absolute, but only repo-relative paths are allowed. Strip the leading %q and retry (e.g. use \"internal/foo/bar.go\" instead of the full path).", path, string(filepath.Separator))
 	}
 
 	rootAbs := filepath.Clean(root)
 	candidate := filepath.Clean(filepath.Join(rootAbs, path))
 	if !withinRoot(rootAbs, candidate) {
-		return "", fmt.Errorf("read_file: path %q escapes the repository root", path)
+		return "", fmt.Errorf("read_file: path %q resolves outside the repository root (likely due to \"..\" segments). Only files inside the repository can be read; provide a path relative to the repo root that does not escape it.", path)
 	}
 
 	// 二次校验：解析软链接后再次确认没有逃逸出仓库根目录。
@@ -115,7 +118,7 @@ func resolveWithinRoot(root, path string) (string, error) {
 	if resolvedRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
 		if resolvedCandidate, err := filepath.EvalSymlinks(candidate); err == nil {
 			if !withinRoot(resolvedRoot, resolvedCandidate) {
-				return "", fmt.Errorf("read_file: path %q escapes the repository root via a symlink", path)
+				return "", fmt.Errorf("read_file: path %q is a symlink that points outside the repository root. Files outside the repository cannot be read; choose a different path.", path)
 			}
 		}
 	}
@@ -164,7 +167,7 @@ func renderLines(path string, data []byte, startLine, endLine int) (string, bool
 		end = total
 	}
 	if start > end {
-		return fmt.Sprintf("read_file: %q requested range start_line=%d end_line=%d is invalid (file has %d lines)", path, startLine, endLine, total), true
+		return fmt.Sprintf("read_file: requested range start_line=%d end_line=%d for %q is invalid because start_line is after end_line (file has %d lines). Swap or fix the two values, e.g. start_line=%d end_line=%d.", startLine, endLine, path, total, end, start), true
 	}
 
 	selected := lines[start-1 : end]
