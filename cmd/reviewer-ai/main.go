@@ -62,17 +62,21 @@ func main() {
 	}
 
 	msgs := prompt.BuildInitial(changes)
-	tools := []schema.ToolDefinition{
-		tool.ReadFileDefinition(),
-		tool.GlobDefinition(),
-		tool.GrepDefinition(),
+	tools := []tool.ITool{
+		tool.ReadFileTool{},
+		tool.GlobTool{},
+		tool.GrepTool{},
+	}
+	toolDefinitions := make([]schema.ToolDefinition, len(tools))
+	for i, t := range tools {
+		toolDefinitions[i] = t.Definition()
 	}
 
 	genCtx, cancel := context.WithTimeout(ctx, modelCfg.Timeout())
 	defer cancel()
 
 	for range maxToolLoopIterations {
-		resp, err := llm.Generate(genCtx, msgs, tools)
+		resp, err := llm.Generate(genCtx, msgs, toolDefinitions)
 		if err != nil {
 			fail("generate review: %v", err)
 		}
@@ -89,18 +93,13 @@ func main() {
 
 		for _, tc := range resp.ToolCalls {
 			var result tool.Result
-			switch tc.Name {
-			case "read_file":
-				result = tool.ReadFile(ctx, repoAbs, tc.Arguments)
-			case "glob":
-				result = tool.Glob(ctx, repoAbs, tc.Arguments)
-			case "grep":
-				result = tool.Grep(ctx, repoAbs, tc.Arguments)
-			default:
+			if t, err := tool.FindToolByName(tools, tc.Name); err != nil {
 				result = tool.Result{
 					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),
 					IsError: true,
 				}
+			} else {
+				result = t.Execute(ctx, repoAbs, tc.Arguments)
 			}
 
 			if result.IsError {

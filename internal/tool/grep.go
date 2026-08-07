@@ -36,6 +36,16 @@ type GrepInput struct {
 	OutputMode string `json:"output_mode,omitempty"` // "files_with_matches"（默认）或 "content"
 }
 
+// GrepTool 是 grep 工具的 ITool 实现，方法体直接委托给同包的
+// GrepDefinition/Grep 自由函数，不重复业务逻辑。
+type GrepTool struct{}
+
+func (GrepTool) Definition() schema.ToolDefinition { return GrepDefinition() }
+
+func (GrepTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+	return Grep(ctx, repoRoot, args)
+}
+
 // GrepDefinition 返回 grep 工具向模型公开的元信息。
 func GrepDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{

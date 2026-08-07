@@ -28,6 +28,16 @@ type ReadFileInput struct {
 	EndLine   int    `json:"end_line,omitempty"`   // 1-based inclusive；0 表示到文件结尾
 }
 
+// ReadFileTool 是 read_file 工具的 ITool 实现，方法体直接委托给同包的
+// ReadFileDefinition/ReadFile 自由函数，不重复业务逻辑。
+type ReadFileTool struct{}
+
+func (ReadFileTool) Definition() schema.ToolDefinition { return ReadFileDefinition() }
+
+func (ReadFileTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+	return ReadFile(ctx, repoRoot, args)
+}
+
 // ReadFileDefinition 返回 read_file 工具向模型公开的元信息。
 func ReadFileDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{

@@ -21,6 +21,16 @@ type GlobInput struct {
 	Pattern string `json:"pattern"` // 如 "internal/**/*.go"；为空时默认 "**/*"
 }
 
+// GlobTool 是 glob 工具的 ITool 实现，方法体直接委托给同包的
+// GlobDefinition/Glob 自由函数，不重复业务逻辑。
+type GlobTool struct{}
+
+func (GlobTool) Definition() schema.ToolDefinition { return GlobDefinition() }
+
+func (GlobTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+	return Glob(ctx, repoRoot, args)
+}
+
 // GlobDefinition 返回 glob 工具向模型公开的元信息。
 func GlobDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{
