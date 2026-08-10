@@ -3,8 +3,12 @@ package gitdiff
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"sort"
+	"strings"
 )
 
 // Change is one file-level change frozen in the Git index.
@@ -43,6 +47,51 @@ func LoadStaged(ctx context.Context, repoDir string) ([]Change, error) {
 		changes = append(changes, Change{Status: status, Path: path, Patch: string(patch)})
 	}
 	return changes, nil
+}
+
+// CurrentBranch returns the short name of the currently checked-out branch
+// (e.g. "main"). In detached HEAD state it returns the short commit hash instead,
+// since there is no branch name to report.
+func CurrentBranch(ctx context.Context, repoDir string) (string, error) {
+	out, err := git(ctx, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve current branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "HEAD" {
+		// rev-parse --abbrev-ref reports the literal "HEAD" in detached state;
+		// fall back to the short commit hash so callers still get a stable identifier.
+		hashOut, err := git(ctx, repoDir, "rev-parse", "--short", "HEAD")
+		if err != nil {
+			return "", fmt.Errorf("resolve detached HEAD commit: %w", err)
+		}
+		return strings.TrimSpace(string(hashOut)), nil
+	}
+	return branch, nil
+}
+
+// SnapshotHash returns a deterministic content hash of changes, independent of
+// slice order. Two snapshots with the same set of (status, path, patch) triples
+// always hash to the same value, even if LoadStaged happened to return them in a
+// different order. Used to look up a prior run whose staged content exactly
+// matches the current one (see store.LoadRunByHash), so re-reviewing content
+// that was already reviewed (e.g. after a git stash / stash pop round trip)
+// can reuse the earlier result instead of starting over.
+func SnapshotHash(changes []Change) string {
+	sorted := make([]Change, len(changes))
+	copy(sorted, changes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+
+	h := sha256.New()
+	for _, c := range sorted {
+		h.Write([]byte(c.Status))
+		h.Write([]byte{0})
+		h.Write([]byte(c.Path))
+		h.Write([]byte{0})
+		h.Write([]byte(c.Patch))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func git(ctx context.Context, repoDir string, args ...string) ([]byte, error) {

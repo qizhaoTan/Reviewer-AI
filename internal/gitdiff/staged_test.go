@@ -172,3 +172,49 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestSnapshotHash(t *testing.T) {
+	a := []Change{{Status: "M", Path: "a.go", Patch: "pa"}, {Status: "M", Path: "b.go", Patch: "pb"}}
+	aReordered := []Change{{Status: "M", Path: "b.go", Patch: "pb"}, {Status: "M", Path: "a.go", Patch: "pa"}}
+	differentPatch := []Change{{Status: "M", Path: "a.go", Patch: "pa-changed"}, {Status: "M", Path: "b.go", Patch: "pb"}}
+	extraFile := []Change{{Status: "M", Path: "a.go", Patch: "pa"}, {Status: "M", Path: "b.go", Patch: "pb"}, {Status: "A", Path: "c.go", Patch: "pc"}}
+
+	tests := []struct {
+		name      string
+		a, b      []Change
+		wantEqual bool
+	}{
+		{name: "identical input produces identical hash", a: a, b: a, wantEqual: true},
+		{name: "order does not affect hash", a: a, b: aReordered, wantEqual: true},
+		{name: "different patch content changes hash", a: a, b: differentPatch, wantEqual: false},
+		{name: "extra file changes hash", a: a, b: extraFile, wantEqual: false},
+		{name: "both empty produces identical hash", a: nil, b: nil, wantEqual: true},
+		{name: "empty vs non-empty differ", a: nil, b: a, wantEqual: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotA := SnapshotHash(tt.a)
+			gotB := SnapshotHash(tt.b)
+			if (gotA == gotB) != tt.wantEqual {
+				t.Errorf("SnapshotHash(%v) == SnapshotHash(%v) = %v, want %v", tt.a, tt.b, gotA == gotB, tt.wantEqual)
+			}
+		})
+	}
+}
+
+func TestSnapshotHashDoesNotMutateInput(t *testing.T) {
+	changes := []Change{{Status: "M", Path: "b.go", Patch: "pb"}, {Status: "M", Path: "a.go", Patch: "pa"}}
+	original := append([]Change(nil), changes...)
+
+	SnapshotHash(changes)
+
+	if len(changes) != len(original) {
+		t.Fatalf("SnapshotHash mutated slice length: got %d, want %d", len(changes), len(original))
+	}
+	for i := range changes {
+		if changes[i] != original[i] {
+			t.Errorf("SnapshotHash mutated input order at index %d: got %+v, want %+v", i, changes[i], original[i])
+		}
+	}
+}

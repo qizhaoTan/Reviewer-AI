@@ -8,16 +8,13 @@ import (
 	"path/filepath"
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/config"
+	"github.com/qizhaoTan/Reviewer-AI/internal/engine"
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
 	"github.com/qizhaoTan/Reviewer-AI/internal/log"
-	"github.com/qizhaoTan/Reviewer-AI/internal/prompt"
 	"github.com/qizhaoTan/Reviewer-AI/internal/provider"
-	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
+	"github.com/qizhaoTan/Reviewer-AI/internal/store"
 	"github.com/qizhaoTan/Reviewer-AI/internal/tool"
 )
-
-// maxToolLoopIterations 是单次审查运行里 Generate 调用的最大轮数，防止模型无限循环调用工具。
-const maxToolLoopIterations = 30
 
 func main() {
 	log.InitDebug()
@@ -38,6 +35,11 @@ func main() {
 	if len(changes) == 0 {
 		fmt.Println("No staged changes to review.")
 		return
+	}
+
+	branch, err := gitdiff.CurrentBranch(ctx, repoAbs)
+	if err != nil {
+		fail("resolve current branch: %v", err)
 	}
 
 	path := *configPath
@@ -61,61 +63,28 @@ func main() {
 		fail("create provider: %v", err)
 	}
 
-	msgs := prompt.BuildInitial(changes)
-	tools := []tool.ITool{
-		tool.ReadFileTool{},
-		tool.GlobTool{},
-		tool.GrepTool{},
+	db, err := store.New("")
+	if err != nil {
+		fail("open run store: %v", err)
 	}
-	toolDefinitions := make([]schema.ToolDefinition, len(tools))
-	for i, t := range tools {
-		toolDefinitions[i] = t.Definition()
-	}
+	defer db.Close()
 
-	genCtx, cancel := context.WithTimeout(ctx, modelCfg.Timeout())
-	defer cancel()
-
-	for range maxToolLoopIterations {
-		resp, err := llm.Generate(genCtx, msgs, toolDefinitions)
-		if err != nil {
-			fail("generate review: %v", err)
-		}
-		msgs = append(msgs, *resp)
-
-		if len(resp.ToolCalls) == 0 {
-			fmt.Println(resp.Content)
-			return
-		}
-
-		for _, tc := range resp.ToolCalls {
-			log.Info("尝试调用工具", "tool", tc.Name, "arguments", tc.Arguments)
-		}
-
-		for _, tc := range resp.ToolCalls {
-			var result tool.Result
-			if t, err := tool.FindToolByName(tools, tc.Name); err != nil {
-				result = tool.Result{
-					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),
-					IsError: true,
-				}
-			} else {
-				result = t.Execute(ctx, repoAbs, tc.Arguments)
-			}
-
-			if result.IsError {
-				log.Error("调用工具失败", "tool", tc.Name, "arguments", tc.Arguments, "output", result.Output)
-			} else {
-				log.Info("调用工具成功", "tool", tc.Name, "arguments", tc.Arguments, "outputLen", len(result.Output))
-			}
-			msgs = append(msgs, schema.Message{
-				Role:       schema.RoleUser,
-				Content:    result.Output,
-				ToolCallID: tc.ID,
-			})
-		}
+	deps := engine.Deps{
+		LLM:   llm,
+		Store: db,
+		Tools: []tool.ITool{
+			tool.ReadFileTool{},
+			tool.GlobTool{},
+			tool.GrepTool{},
+		},
 	}
 
-	fail("exceeded max tool-call iterations (%d) without a final answer", maxToolLoopIterations)
+	run, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())
+	if err != nil {
+		fail("%v", err)
+	}
+
+	fmt.Println(run.Messages[len(run.Messages)-1].Content)
 }
 
 func fail(format string, args ...any) {
