@@ -109,19 +109,19 @@ func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result
 // resolveWithinRoot 把 repo 相对路径解析为绝对路径，并确保结果不逃逸出 root。
 func resolveWithinRoot(root, path string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("read_file: path must not be empty. Provide a repo-relative file path, e.g. \"internal/foo/bar.go\".")
+		return "", fmt.Errorf("read_file: path must not be empty. Provide a repo-relative file path, e.g. \"internal/foo/bar.go\"")
 	}
 	if strings.ContainsRune(path, 0) {
-		return "", fmt.Errorf("read_file: path %q contains a NUL byte, which is not a valid file path. Provide a plain repo-relative path.", path)
+		return "", fmt.Errorf("read_file: path %q contains a NUL byte, which is not a valid file path. Provide a plain repo-relative path", path)
 	}
 	if filepath.IsAbs(path) {
-		return "", fmt.Errorf("read_file: path %q is absolute, but only repo-relative paths are allowed. Strip the leading %q and retry (e.g. use \"internal/foo/bar.go\" instead of the full path).", path, string(filepath.Separator))
+		return "", fmt.Errorf("read_file: path %q is absolute, but only repo-relative paths are allowed. Strip the leading %q and retry (e.g. use \"internal/foo/bar.go\" instead of the full path)", path, string(filepath.Separator))
 	}
 
 	rootAbs := filepath.Clean(root)
 	candidate := filepath.Clean(filepath.Join(rootAbs, path))
 	if !withinRoot(rootAbs, candidate) {
-		return "", fmt.Errorf("read_file: path %q resolves outside the repository root (likely due to \"..\" segments). Only files inside the repository can be read; provide a path relative to the repo root that does not escape it.", path)
+		return "", fmt.Errorf("read_file: path %q resolves outside the repository root (likely due to \"..\" segments). Only files inside the repository can be read; provide a path relative to the repo root that does not escape it", path)
 	}
 
 	// 二次校验：解析软链接后再次确认没有逃逸出仓库根目录。
@@ -129,7 +129,7 @@ func resolveWithinRoot(root, path string) (string, error) {
 	if resolvedRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
 		if resolvedCandidate, err := filepath.EvalSymlinks(candidate); err == nil {
 			if !withinRoot(resolvedRoot, resolvedCandidate) {
-				return "", fmt.Errorf("read_file: path %q is a symlink that points outside the repository root. Files outside the repository cannot be read; choose a different path.", path)
+				return "", fmt.Errorf("read_file: path %q is a symlink that points outside the repository root. Files outside the repository cannot be read; choose a different path", path)
 			}
 		}
 	}
