@@ -111,9 +111,11 @@ type Report struct {
 
 // KeptFindings 返回通过复核的意见。复核尚未执行（Critiqued 为 false）时
 // 返回全部意见——此时没有任何依据可以丢弃它们。
+//
+// 返回的一律是新切片，调用方可以安全地就地排序而不影响这份 Report。
 func (r Report) KeptFindings() []Finding {
 	if !r.Critiqued {
-		return r.Findings
+		return append([]Finding(nil), r.Findings...)
 	}
 	kept := make([]Finding, 0, len(r.Findings))
 	for _, f := range r.Findings {

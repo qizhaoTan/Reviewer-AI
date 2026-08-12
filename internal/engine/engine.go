@@ -13,6 +13,7 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
 	"github.com/qizhaoTan/Reviewer-AI/internal/log"
 	"github.com/qizhaoTan/Reviewer-AI/internal/prompt"
+	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 	"github.com/qizhaoTan/Reviewer-AI/internal/store"
 	"github.com/qizhaoTan/Reviewer-AI/internal/tool"
@@ -29,7 +30,7 @@ type Deps struct {
 }
 
 // Run 执行一次完整的审查：查找或新建一条 Run 记录，驱动 tool loop 直到模型
-// 给出不再携带工具调用的最终答案，期间每轮往返都会落盘。
+// 调用 submit_review 提交结构化结果，期间每轮往返都会落盘。
 //
 // repoAbs 是仓库的绝对路径，branch 是当前分支名（调用方通过 gitdiff.CurrentBranch
 // 获得），两者拼成 runKey 用于隔离不同分支的运行记录，见 buildRunKey 注释。
@@ -39,19 +40,25 @@ type Deps struct {
 // completed，直接复用那次的结果、不再调用模型——常见于 git stash 之后又
 // stash pop 回同样的内容，或者反复对同一份暂存区改动跑审查的场景。
 //
-// 返回的 *store.Run 在成功时 Status 为 store.StatusCompleted。失败时返回的 error
-// 会说明具体原因，调用方对应的 Run 记录已经在返回前被标记为 store.StatusFailed 并落盘，
-// 不需要调用方再做任何清理。
-func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
+// 返回的 *store.Run 在成功时 Status 为 store.StatusCompleted，第二个返回值是模型
+// 提交的结构化审查结果。失败时返回的 error 会说明具体原因，对应的 Run 记录已经在
+// 返回前被标记为 store.StatusFailed 并落盘，不需要调用方再做任何清理。
+//
+// TODO(阶段二 2.6)：Report 目前只能随返回值传出，命中 completed 缓存时因此拿不到
+// 历史结果（见下方分支）。等 store.Run 加上 Findings/Summary 字段后，Report 就能
+// 随记录一起持久化，缓存命中的路径也能返回完整结果。
+func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, *review.Report, error) {
 	runKey := buildRunKey(repoAbs, branch)
 
 	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes)
 	if err != nil {
-		return nil, fmt.Errorf("resume or start run: %w", err)
+		return nil, nil, fmt.Errorf("resume or start run: %w", err)
 	}
 	if run.Status == store.StatusCompleted {
+		// Findings 尚未持久化，所以这里只能返回记录本身、Report 为 nil。
+		// 调用方需要能处理这种情况，直到 2.6 补上存储。
 		log.Info("命中内容相同的历史审查结果，直接复用", "runID", run.ID)
-		return run, nil
+		return run, nil, nil
 	}
 	msgs := run.Messages
 
@@ -66,20 +73,31 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 	for range maxToolLoopIterations {
 		resp, err := deps.LLM.Generate(genCtx, msgs, toolDefinitions)
 		if err != nil {
-			return nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
+			return nil, nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
 		}
 		msgs = append(msgs, *resp)
 		setMessages(ctx, deps.Store, run, msgs)
 
+		// 模型没有发起任何工具调用，说明它在用自由文本作答——但审查结果只认
+		// submit_review。把这件事作为工具错误告诉它，让它补上这次调用，
+		// 而不是直接把这段文本当成最终结果收下。
 		if len(resp.ToolCalls) == 0 {
-			setStatus(ctx, deps.Store, run, store.StatusCompleted)
-			return run, nil
+			log.Info("模型未调用任何工具，提示它用 submit_review 收尾")
+			msgs = append(msgs, schema.Message{
+				Role: schema.RoleUser,
+				Content: fmt.Sprintf("Your review has not been recorded: a review is only accepted through the %s tool. "+
+					"Call %s now with your findings (or an empty findings array if the changeset looks fine).",
+					tool.SubmitReviewName, tool.SubmitReviewName),
+			})
+			setMessages(ctx, deps.Store, run, msgs)
+			continue
 		}
 
 		for _, tc := range resp.ToolCalls {
 			log.Info("尝试调用工具", "tool", tc.Name, "arguments", tc.Arguments)
 		}
 
+		var report *review.Report
 		for _, tc := range resp.ToolCalls {
 			var result tool.Result
 			if t, err := tool.FindToolByName(deps.Tools, tc.Name); err != nil {
@@ -96,6 +114,11 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 			} else {
 				log.Info("调用工具成功", "tool", tc.Name, "arguments", tc.Arguments, "outputLen", len(result.Output))
 			}
+			// ReviewResult 非 nil 即"审查已提交"，不需要按工具名做字符串比较。
+			// 同一轮里若提交了多次，以最后一次为准（与工具自身的覆盖语义一致）。
+			if result.ReviewResult != nil {
+				report = result.ReviewResult
+			}
 			msgs = append(msgs, schema.Message{
 				Role:       schema.RoleUser,
 				Content:    result.Output,
@@ -103,9 +126,15 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 			})
 		}
 		setMessages(ctx, deps.Store, run, msgs)
+
+		if report != nil {
+			log.Info("收到结构化审查结果", "findings", len(report.Findings))
+			setStatus(ctx, deps.Store, run, store.StatusCompleted)
+			return run, report, nil
+		}
 	}
 
-	return nil, failRun(ctx, deps.Store, run, "exceeded max tool-call iterations (%d) without a final answer", maxToolLoopIterations)
+	return nil, nil, failRun(ctx, deps.Store, run, "exceeded max tool-call iterations (%d) without calling %s", maxToolLoopIterations, tool.SubmitReviewName)
 }
 
 // buildRunKey 把分支名并入 repo 路径，让同一仓库不同分支的运行记录互不干扰——

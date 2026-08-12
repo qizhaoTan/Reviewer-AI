@@ -278,3 +278,39 @@ func TestReportKeptFindings(t *testing.T) {
 		})
 	}
 }
+
+// TestKeptFindingsReturnsACopy 固定住"返回的一律是新切片"这条约定。
+// 未复核时曾经直接返回 r.Findings 本身，导致调用方（Render 的排序）
+// 会打乱调用方持有的 Report。
+func TestKeptFindingsReturnsACopy(t *testing.T) {
+	tests := []struct {
+		name   string
+		report Report
+	}{
+		{
+			name: "before critique",
+			report: Report{Critiqued: false, Findings: []Finding{
+				{ID: "f1"}, {ID: "f2"},
+			}},
+		},
+		{
+			name: "after critique",
+			report: Report{Critiqued: true, Findings: []Finding{
+				{ID: "f1", Kept: true}, {ID: "f2", Kept: true},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.report.KeptFindings()
+			if len(got) < 2 {
+				t.Fatalf("len(KeptFindings()) = %d, want at least 2 for this test", len(got))
+			}
+			got[0].ID = "mutated"
+			if tt.report.Findings[0].ID == "mutated" {
+				t.Error("writing to KeptFindings() result modified the Report; want an independent copy")
+			}
+		})
+	}
+}

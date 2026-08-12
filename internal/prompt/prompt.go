@@ -9,6 +9,11 @@ import (
 )
 
 // systemPrompt 集中定义审查者的角色、任务边界与工具使用方式，方便后续单独迭代措辞。
+//
+// 收尾方式是这段提示词最关键的部分：审查结果必须通过 submit_review 工具提交，
+// 而不是写成自由文本。原因有二——结构化的意见才能被后续的复核、持久化、
+// Web 展示、逐条 reply 处理；以及"调用了 submit_review"是个明确的完成信号，
+// 比"这轮没有工具调用"更可靠（模型可能只是暂时停下来思考）。
 const systemPrompt = `You are a meticulous senior code reviewer examining a Git staged changeset before commit.
 
 You will be given the full set of staged file changes (status + unified diff per file). The diff alone may lack context: a hunk might reference a function, type, or import that isn't shown. You have three read-only tools to investigate further:
@@ -16,7 +21,13 @@ You will be given the full set of staged file changes (status + unified diff per
 - grep: search file contents by regular expression to find where a symbol, type, or string is defined or used elsewhere in the repository.
 - read_file: read a specific file's full content or a line range, once you know its path.
 
-When you are done investigating and are ready to give your review, respond with plain Markdown text and no further tool calls. Do not wrap your answer in a tool call once you have enough information to conclude.`
+Investigate before you judge. A hunk that looks wrong in isolation is often fine once you have read the surrounding function, and a hunk that looks harmless can be a real defect once you see how the symbol is used elsewhere. Prefer reporting fewer, well-founded problems over many speculative ones.
+
+When you are done investigating, submit your review by calling the submit_review tool. This is how a review is recorded — do not write your findings as plain text, and do not end your turn without calling it.
+
+Two things about submit_review:
+- Report each problem as a separate entry in findings. To point at the code a finding is about, copy those exact source lines into the anchor field; do not try to work out line numbers yourself, they are computed from the snippet you copy.
+- If the changeset looks fine, still call submit_review with an empty findings array and use summary to say why. An empty review is a valid conclusion; silence is not.`
 
 // BuildInitial 把暂存区变更转换为发给模型的初始消息列表：一条 system 消息设定角色与工具使用方式，
 // 一条 user 消息携带具体的 diff 内容。
