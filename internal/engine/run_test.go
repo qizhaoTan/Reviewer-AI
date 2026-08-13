@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,17 +131,14 @@ func TestRun(t *testing.T) {
 		// wantStatus 是运行结束后落盘记录应有的状态。
 		wantStatus store.RunStatus
 		// check 在期望成功时对返回的 Report 做断言。
-		check func(*testing.T, *store.Run, *review.Report)
+		check func(*testing.T, *store.Run, review.Report)
 	}{
 		{
 			name:       "submitting on the first turn ends the loop immediately",
 			script:     []schema.Message{submitCall("tc1", "looks fine", map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "swallowed error"})},
 			wantCalls:  1,
 			wantStatus: store.StatusCompleted,
-			check: func(t *testing.T, run *store.Run, r *review.Report) {
-				if r == nil {
-					t.Fatal("Report is nil, want the submitted review")
-				}
+			check: func(t *testing.T, run *store.Run, r review.Report) {
 				if len(r.Findings) != 1 {
 					t.Fatalf("len(Findings) = %d, want 1", len(r.Findings))
 				}
@@ -158,7 +156,7 @@ func TestRun(t *testing.T) {
 			},
 			wantCalls:  3,
 			wantStatus: store.StatusCompleted,
-			check: func(t *testing.T, run *store.Run, r *review.Report) {
+			check: func(t *testing.T, run *store.Run, r review.Report) {
 				if len(r.Findings) != 0 {
 					t.Errorf("len(Findings) = %d, want 0", len(r.Findings))
 				}
@@ -175,7 +173,7 @@ func TestRun(t *testing.T) {
 			},
 			wantCalls:  2,
 			wantStatus: store.StatusCompleted,
-			check: func(t *testing.T, run *store.Run, r *review.Report) {
+			check: func(t *testing.T, run *store.Run, r review.Report) {
 				// 那段自由文本必须被一条"提醒去调 submit_review"的用户消息跟上，
 				// 否则模型不知道自己漏了什么。
 				var nudged bool
@@ -199,7 +197,7 @@ func TestRun(t *testing.T) {
 			},
 			wantCalls:  2,
 			wantStatus: store.StatusCompleted,
-			check: func(t *testing.T, run *store.Run, r *review.Report) {
+			check: func(t *testing.T, run *store.Run, r review.Report) {
 				if len(r.Findings) != 1 || r.Findings[0].Severity != "warning" {
 					t.Errorf("Findings = %+v, want the corrected submission to win", r.Findings)
 				}
@@ -220,7 +218,7 @@ func TestRun(t *testing.T) {
 			deps, db := newTestDeps(t, llm, changes)
 			repoAbs := t.TempDir()
 
-			run, report, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
 
 			if tt.wantErrContains != "" {
 				if err == nil {
@@ -244,7 +242,7 @@ func TestRun(t *testing.T) {
 			}
 
 			if tt.check != nil {
-				tt.check(t, run, report)
+				tt.check(t, run, run.Report())
 			}
 		})
 	}
@@ -265,7 +263,7 @@ func TestRunExposesSubmitReviewToTheModel(t *testing.T) {
 			llm := &fakeProvider{script: []schema.Message{submitCall("tc1", "fine")}}
 			deps, _ := newTestDeps(t, llm, changes)
 
-			if _, _, err := Run(context.Background(), deps, t.TempDir(), "main", changes, time.Minute); err != nil {
+			if _, err := Run(context.Background(), deps, t.TempDir(), "main", changes, time.Minute); err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
 
@@ -305,7 +303,7 @@ func TestRunGenerateFailureMarksRunFailed(t *testing.T) {
 			deps, db := newTestDeps(t, llm, changes)
 			repoAbs := t.TempDir()
 
-			_, _, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			_, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
 			if err == nil {
 				t.Fatal("Run() error = nil, want the provider failure to surface")
 			}
@@ -330,4 +328,226 @@ func latestRun(t *testing.T, db *store.Store, repoAbs, branch string) store.Run 
 		t.Fatal("no runs persisted, want at least one")
 	}
 	return runs[0]
+}
+
+// critiqueDeps 在基础 Deps 上补齐复核工具，让 Run 会真的走复核阶段。
+func withCritique(deps Deps, changes []gitdiff.Change) Deps {
+	deps.CritiqueTools = []tool.ITool{
+		tool.ReadFileTool{}, tool.GlobTool{}, tool.GrepTool{}, tool.CritiqueVerdictTool{},
+	}
+	deps.CritiqueConcurrency = 2
+	deps.CritiqueMaxTurns = 5
+	return deps
+}
+
+// reviewThenCritiqueProvider 先按初审脚本走，之后的请求（工具清单里含
+// submit_verdict）一律当作复核请求处理。
+type reviewThenCritiqueProvider struct {
+	fakeProvider
+	// keep 决定复核裁决；nil 表示一律保留。
+	keep func(userMessage string) bool
+	// critiqueCalls 记录复核阶段发生了多少次 Generate。复核是并发的，
+	// 多个 goroutine 会同时命中这个计数器，必须用原子操作。
+	critiqueCalls atomic.Int64
+}
+
+func (p *reviewThenCritiqueProvider) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
+	for _, t := range tools {
+		if t.Name == tool.CritiqueVerdictName {
+			p.critiqueCalls.Add(1)
+			keep := p.keep == nil || p.keep(msgs[1].Content)
+			args, _ := json.Marshal(tool.Verdict{Keep: keep, Reason: "verdict"})
+			return &schema.Message{
+				Role:      schema.RoleAssistant,
+				ToolCalls: []schema.ToolCall{{ID: "v1", Name: tool.CritiqueVerdictName, Arguments: args}},
+			}, nil
+		}
+	}
+	return p.fakeProvider.Generate(ctx, msgs, tools)
+}
+
+// TestRunPersistsFindings 验证审查结果确实写进了 Run 记录，而不只是随返回值传出。
+func TestRunPersistsFindings(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name string
+		keep func(string) bool
+		// wantPersistedFindings 是落盘记录里应有的意见条数（含被丢弃的）。
+		wantPersistedFindings int
+		// wantKept 是复核后仍然保留的条数。
+		wantKept int
+	}{
+		{
+			name:                  "keeping both findings persists both",
+			wantPersistedFindings: 2, wantKept: 2,
+		},
+		{
+			name:                  "a dropped finding is still persisted",
+			keep:                  func(msg string) bool { return !strings.Contains(msg, "noise") },
+			wantPersistedFindings: 2, wantKept: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &reviewThenCritiqueProvider{keep: tt.keep}
+			llm.script = []schema.Message{submitCall("tc1", "two comments",
+				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "real problem"},
+				map[string]any{"file": "config.go", "severity": "info", "summary": "noise"},
+			)}
+			base, db := newTestDeps(t, llm, changes)
+			deps := withCritique(base, changes)
+			repoAbs := t.TempDir()
+
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			persisted := latestRun(t, db, repoAbs, "main")
+			if len(persisted.Findings) != tt.wantPersistedFindings {
+				t.Fatalf("persisted Findings = %d, want %d (dropped findings must be kept in the database)",
+					len(persisted.Findings), tt.wantPersistedFindings)
+			}
+			if !persisted.Critiqued {
+				t.Error("persisted Critiqued = false, want true after the critique ran")
+			}
+			if persisted.Summary == "" {
+				t.Error("persisted Summary is empty, want the model's overall assessment")
+			}
+			if got := len(persisted.Report().KeptFindings()); got != tt.wantKept {
+				t.Errorf("kept findings = %d, want %d", got, tt.wantKept)
+			}
+			// 返回的 run 和落盘的记录必须一致——调用方拿哪个都一样。
+			if len(run.Findings) != len(persisted.Findings) {
+				t.Errorf("returned run has %d findings, persisted has %d", len(run.Findings), len(persisted.Findings))
+			}
+		})
+	}
+}
+
+// TestRunReusesPersistedFindingsOnCacheHit 验证命中历史 completed 记录时，
+// 结果直接来自数据库，一次模型调用都不发生。
+func TestRunReusesPersistedFindingsOnCacheHit(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name string
+	}{
+		{name: "the second run answers from the database"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &reviewThenCritiqueProvider{}
+			llm.script = []schema.Message{submitCall("tc1", "one comment",
+				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "real problem"},
+			)}
+			base, _ := newTestDeps(t, llm, changes)
+			deps := withCritique(base, changes)
+			repoAbs := t.TempDir()
+
+			first, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("first Run() error = %v", err)
+			}
+			callsAfterFirst := llm.calls + int(llm.critiqueCalls.Load())
+
+			// 同样的内容再跑一次：应该完全命中缓存。
+			second, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("second Run() error = %v", err)
+			}
+
+			if got := llm.calls + int(llm.critiqueCalls.Load()); got != callsAfterFirst {
+				t.Errorf("the second run made %d extra model calls, want 0", got-callsAfterFirst)
+			}
+			if second.ID != first.ID {
+				t.Errorf("second run ID = %q, want the cached run %q", second.ID, first.ID)
+			}
+			report := second.Report()
+			if len(report.Findings) != 1 || report.Findings[0].Summary != "real problem" {
+				t.Errorf("cached report = %+v, want the findings stored by the first run", report)
+			}
+			if !report.Critiqued {
+				t.Error("cached report Critiqued = false, want the stored value")
+			}
+			if report.Findings[0].StartLine != 13 {
+				t.Errorf("cached StartLine = %d, want 13: resolved line numbers must survive the round trip",
+					report.Findings[0].StartLine)
+			}
+
+		})
+	}
+}
+
+// TestRunResumesFromCritique 验证一条"初审已完成、复核未完成"的记录被恢复时，
+// 直接从复核阶段接着跑，不让模型把整个 changeset 重审一遍。
+func TestRunResumesFromCritique(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name string
+		// seedFindings 是预置的初审结果。
+		seedFindings []review.Finding
+		wantKept     int
+	}{
+		{
+			name: "resumes with the stored findings instead of re-reviewing",
+			seedFindings: []review.Finding{
+				{ID: "f1", File: "config.go", Severity: review.SeverityError, Summary: "real problem"},
+				{ID: "f2", File: "config.go", Severity: review.SeverityInfo, Summary: "noise"},
+			},
+			wantKept: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &reviewThenCritiqueProvider{
+				keep: func(msg string) bool { return !strings.Contains(msg, "noise") },
+			}
+			// 初审脚本刻意留空：一旦走了主循环就会拿不到 submit_review 而失败，
+			// 从而暴露"没有真正跳过初审"的问题。
+			base, db := newTestDeps(t, llm, changes)
+			deps := withCritique(base, changes)
+			repoAbs := t.TempDir()
+
+			// 预置一条初审已完成、复核未完成的记录。
+			seed := store.Run{
+				ID:       store.NewRunID(),
+				RepoPath: buildRunKey(repoAbs, "main"),
+				Status:   store.StatusInProgress,
+				Snapshot: changes,
+				Findings: tt.seedFindings,
+				Summary:  "initial review done",
+			}
+			if err := db.SaveRun(context.Background(), seed); err != nil {
+				t.Fatalf("seed SaveRun: %v", err)
+			}
+
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if run.ID != seed.ID {
+				t.Errorf("run ID = %q, want the seeded run %q (a new run means the initial review was thrown away)",
+					run.ID, seed.ID)
+			}
+			if llm.calls != 0 {
+				t.Errorf("the main review loop ran %d times, want 0: the stored initial review must be reused", llm.calls)
+			}
+			if got := int(llm.critiqueCalls.Load()); got != len(tt.seedFindings) {
+				t.Errorf("critique made %d calls, want %d (one per finding)", got, len(tt.seedFindings))
+			}
+			if !run.Critiqued {
+				t.Error("Critiqued = false, want true after resuming through the critique")
+			}
+			if got := len(run.Report().KeptFindings()); got != tt.wantKept {
+				t.Errorf("kept findings = %d, want %d", got, tt.wantKept)
+			}
+		})
+	}
 }

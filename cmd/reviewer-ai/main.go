@@ -86,17 +86,12 @@ func main() {
 		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
 	}
 
-	run, report, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())
+	run, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())
 	if err != nil {
 		fail("%v", err)
 	}
-	if report == nil {
-		// 命中了历史 completed 记录，但 Findings 还没有持久化（阶段二 2.6 会补上）。
-		fmt.Printf("This changeset was already reviewed (run %s), but stored findings are not available yet.\n", run.ID)
-		return
-	}
 
-	fmt.Print(review.Render(*report))
+	fmt.Print(review.Render(run.Report()))
 }
 
 func fail(format string, args ...any) {

@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
+	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
@@ -43,6 +44,37 @@ type Run struct {
 	UpdatedAt time.Time
 	Snapshot  []gitdiff.Change // 本次审查时的暂存区快照，供后续增量重审比较基线
 	Messages  []schema.Message // 发给模型的完整消息历史（含工具调用往返）
+
+	// Findings 是模型提交的结构化审查意见，含复核判定为丢弃的那些
+	// （Kept=false）——保留它们是为了能回答"复核到底砍掉了什么、为什么"。
+	// 初审一提交就落盘，不等复核完成：复核是一批重活，跑到一半崩了却没存
+	// 初审结果的话，恢复时得让模型重审一遍。
+	Findings []review.Finding
+
+	// Summary 是模型对本次改动的整体评价。
+	Summary string
+
+	// Critiqued 标记复核阶段是否已经跑完，用于区分"复核判定丢弃"和"复核还没跑、
+	// Kept 只是零值"这两种含义完全不同的 Kept=false。恢复时也靠它判断该从
+	// 主循环还是复核阶段接着跑。
+	Critiqued bool
+}
+
+// Report 把 Run 上的三个字段还原成一份 review.Report。
+// 命中历史记录时调用方拿到的就是这个，与刚跑完一次审查得到的结构完全一致。
+func (r Run) Report() review.Report {
+	return review.Report{
+		Findings:  r.Findings,
+		Summary:   r.Summary,
+		Critiqued: r.Critiqued,
+	}
+}
+
+// SetReport 把一份 review.Report 摊平到 Run 的对应字段上，是 Report 的逆操作。
+func (r *Run) SetReport(report review.Report) {
+	r.Findings = report.Findings
+	r.Summary = report.Summary
+	r.Critiqued = report.Critiqued
 }
 
 // NewRunID 生成一个新的 Run ID。抽成函数是为了调用方（main.go）和测试都能拿到
@@ -111,26 +143,36 @@ func migrate(db *sql.DB) error {
 			updated_at    INTEGER NOT NULL,
 			snapshot      TEXT    NOT NULL,
 			snapshot_hash TEXT    NOT NULL DEFAULT '',
-			messages      TEXT    NOT NULL
+			messages      TEXT    NOT NULL,
+			findings      TEXT    NOT NULL DEFAULT '[]',
+			summary       TEXT    NOT NULL DEFAULT '',
+			critiqued     INTEGER NOT NULL DEFAULT 0
 		);
 	`); err != nil {
 		return err
 	}
 
-	// 兼容在 snapshot_hash 列引入之前创建的旧库：CREATE TABLE IF NOT EXISTS 对已存在的表
-	// 不会补列，所以显式检查并 ALTER TABLE 补上（默认值为空字符串，旧记录不会自然匹配任何
-	// 新算出的 hash，但至少不会导致 SELECT/INSERT 报 "no such column"）。
-	hasSnapshotHash, err := columnExists(db, "runs", "snapshot_hash")
-	if err != nil {
-		return err
-	}
-	if !hasSnapshotHash {
-		if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN snapshot_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+	// 兼容在这些列引入之前创建的旧库：CREATE TABLE IF NOT EXISTS 对已存在的表
+	// 不会补列，所以逐个显式检查并 ALTER TABLE 补上。默认值让旧记录读出来是
+	// "没有意见、没有复核过"，语义上正确——那些运行确实是在结构化输出之前跑的。
+	for _, col := range []struct{ name, ddl string }{
+		{"snapshot_hash", `ALTER TABLE runs ADD COLUMN snapshot_hash TEXT NOT NULL DEFAULT ''`},
+		{"findings", `ALTER TABLE runs ADD COLUMN findings TEXT NOT NULL DEFAULT '[]'`},
+		{"summary", `ALTER TABLE runs ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
+		{"critiqued", `ALTER TABLE runs ADD COLUMN critiqued INTEGER NOT NULL DEFAULT 0`},
+	} {
+		exists, err := columnExists(db, "runs", col.name)
+		if err != nil {
 			return err
+		}
+		if !exists {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return err
+			}
 		}
 	}
 
-	_, err = db.Exec(`
+	_, err := db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_runs_repo_updated ON runs(repo_path, updated_at);
 		CREATE INDEX IF NOT EXISTS idx_runs_repo_snapshot_hash ON runs(repo_path, snapshot_hash);
 	`)
@@ -173,6 +215,16 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 	if err != nil {
 		return fmt.Errorf("marshal messages for run %s: %w", run.ID, err)
 	}
+	// findings 为 nil 时存 "[]" 而不是 "null"，让列里始终是一个合法的 JSON 数组，
+	// 读出来也就始终是空切片而非 nil。
+	findings := run.Findings
+	if findings == nil {
+		findings = []review.Finding{}
+	}
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		return fmt.Errorf("marshal findings for run %s: %w", run.ID, err)
+	}
 	snapshotHash := gitdiff.SnapshotHash(run.Snapshot)
 
 	now := time.Now()
@@ -182,15 +234,20 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages, findings, summary, critiqued)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			status        = excluded.status,
 			updated_at    = excluded.updated_at,
 			snapshot      = excluded.snapshot,
 			snapshot_hash = excluded.snapshot_hash,
-			messages      = excluded.messages
-	`, run.ID, run.RepoPath, string(run.Status), createdAt.UnixNano(), now.UnixNano(), string(snapshotJSON), snapshotHash, string(messagesJSON))
+			messages      = excluded.messages,
+			findings      = excluded.findings,
+			summary       = excluded.summary,
+			critiqued     = excluded.critiqued
+	`, run.ID, run.RepoPath, string(run.Status), createdAt.UnixNano(), now.UnixNano(),
+		string(snapshotJSON), snapshotHash, string(messagesJSON),
+		string(findingsJSON), run.Summary, run.Critiqued)
 	if err != nil {
 		return fmt.Errorf("save run %s: %w", run.ID, err)
 	}
@@ -200,7 +257,7 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 // LoadRun 按 ID 加载一条运行记录；不存在时返回 (nil, nil)。
 func (s *Store) LoadRun(ctx context.Context, id string) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, repo_path, status, created_at, updated_at, snapshot, messages
+		SELECT `+runColumns+`
 		FROM runs WHERE id = ?
 	`, id)
 	run, err := scanRun(row)
@@ -216,7 +273,7 @@ func (s *Store) LoadRun(ctx context.Context, id string) (*Run, error) {
 // LoadLatestRun 按 repoPath 查找最近更新的一条记录；不存在时返回 (nil, nil)。
 func (s *Store) LoadLatestRun(ctx context.Context, repoPath string) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, repo_path, status, created_at, updated_at, snapshot, messages
+		SELECT `+runColumns+`
 		FROM runs WHERE repo_path = ?
 		ORDER BY updated_at DESC
 		LIMIT 1
@@ -239,7 +296,7 @@ func (s *Store) LoadLatestRun(ctx context.Context, repoPath string) (*Run, error
 // 同一 hash 有多条命中时返回最近更新的一条；不存在时返回 (nil, nil)。
 func (s *Store) LoadRunByHash(ctx context.Context, repoPath, snapshotHash string) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, repo_path, status, created_at, updated_at, snapshot, messages
+		SELECT `+runColumns+`
 		FROM runs WHERE repo_path = ? AND snapshot_hash = ?
 		ORDER BY updated_at DESC
 		LIMIT 1
@@ -258,7 +315,7 @@ func (s *Store) LoadRunByHash(ctx context.Context, repoPath, snapshotHash string
 // （limit <= 0 时不限制）。供 Web 可视化的列表页使用。
 func (s *Store) ListRuns(ctx context.Context, repoPath string, limit int) ([]Run, error) {
 	query := `
-		SELECT id, repo_path, status, created_at, updated_at, snapshot, messages
+		SELECT ` + runColumns + `
 		FROM runs WHERE repo_path = ?
 		ORDER BY updated_at DESC
 	`
@@ -285,6 +342,11 @@ func (s *Store) ListRuns(ctx context.Context, repoPath string, limit int) ([]Run
 	return runs, rows.Err()
 }
 
+// runColumns 是所有查询共用的列清单，顺序必须与 scanRun 的 Scan 参数一一对应。
+// 抽成常量是因为之前四处 SELECT 各写一遍，加一列就要改四处，漏改一处就是
+// "列数对不上"的运行期错误。
+const runColumns = `id, repo_path, status, created_at, updated_at, snapshot, messages, findings, summary, critiqued`
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -293,8 +355,9 @@ func scanRun(row rowScanner) (*Run, error) {
 	var run Run
 	var status string
 	var createdAt, updatedAt int64
-	var snapshotJSON, messagesJSON string
-	if err := row.Scan(&run.ID, &run.RepoPath, &status, &createdAt, &updatedAt, &snapshotJSON, &messagesJSON); err != nil {
+	var snapshotJSON, messagesJSON, findingsJSON string
+	if err := row.Scan(&run.ID, &run.RepoPath, &status, &createdAt, &updatedAt,
+		&snapshotJSON, &messagesJSON, &findingsJSON, &run.Summary, &run.Critiqued); err != nil {
 		return nil, err
 	}
 	run.Status = RunStatus(status)
@@ -305,6 +368,9 @@ func scanRun(row rowScanner) (*Run, error) {
 	}
 	if err := json.Unmarshal([]byte(messagesJSON), &run.Messages); err != nil {
 		return nil, fmt.Errorf("unmarshal messages: %w", err)
+	}
+	if err := json.Unmarshal([]byte(findingsJSON), &run.Findings); err != nil {
+		return nil, fmt.Errorf("unmarshal findings: %w", err)
 	}
 	return &run, nil
 }

@@ -31,23 +31,34 @@
 - [x] **2.4** 修改 `internal/engine`（不是 main.go，阶段一已把循环搬进 engine）：循环终止条件改为
       `result.ReviewResult != nil`；模型若用自由文本作答，回一条提示消息让它补调 `submit_review`，而不是把文本当成结果收下。
       新增 `internal/engine/run_test.go`（fake provider 驱动完整 tool loop）。
-      *遗留*：初审 Report 目前只能随返回值传出，命中 completed 缓存时拿不到历史结果——待 2.6 加上存储后解决。
+      ~~遗留：命中 completed 缓存时拿不到历史结果~~ → 已由 2.6 解决。
 - [x] **2.5** 新建 `internal/engine/critique.go`（**不是 review 包**：`tool` 已经导入 `review`，复核循环要用工具
       就只能放在能同时导入两者的 engine 层）：每条 Finding 起一个独立 tool loop 并发复核，errgroup 限流。
       配套 `internal/tool/critiqueverdict.go`（`submit_verdict` 工具，结果走 `Result.CritiqueVerdict`）、
       `config.Critique` 配置段（`concurrency` / `max_turns`，默认 10 / 30）。参数见设计笔记"六"。
       单条复核失败时**保留**该意见并记录原因，不因基础设施抖动而静默吞掉审查意见。
-- [ ] **2.6** 修改 `internal/store`：`Run` 加 `Findings []review.Finding`、`Summary`、`Critiqued` 字段
+- [x] **2.6** 修改 `internal/store`：`Run` 加 `Findings []review.Finding`、`Summary`、`Critiqued` 字段
       （含 `Kept=false` 的被丢弃项也落盘），数据库加列 + 旧库迁移；命中 completed 缓存时复用 `Findings` 而非最后一条消息。
+      附带：初审一提交就落盘（不等复核）；新增"初审已完成、复核未完成"的恢复分支，直接从复核接着跑；
+      `engine.Run` 返回值收敛回 `(*store.Run, error)`，结果从 `run.Report()` 取。
 - [x] **2.7** 终端输出：`internal/review/render.go` 把 `Report` 渲染成文本列表
       （severity 降序 → 文件 → 行号排序，`[ERROR] path:12-14 (f1)` 形式，只展示通过复核的意见）。
-- [ ] **2.8** 新建/补充测试：表驱动覆盖参数解析、非法输入。
+- [x] **2.8** 新建/补充测试：表驱动覆盖参数解析、非法输入。
       - [x] `internal/review/review_test.go`、`internal/review/anchor_test.go`、`internal/gitdiff/hunk_test.go`
       - [x] `internal/tool/submitreview_test.go`（含单实例并发共享的 `-race` 测试）
       - [x] `internal/engine/critique_test.go`（并发上限、失败保留、轮数上限、复核提示词措辞）、
             `internal/tool/critiqueverdict_test.go`、`config_test.go` 的 critique 段
-- [ ] **2.9** `go build ./... && go test ./... && gofmt -l . && go vet ./...` 全绿。
-- [ ] **2.10** 手工验证：真实跑一次确认模型调用 `submit_review` 而非自由文本；构造一个容易被误判的改动，观察复审是否过滤掉了过度解读的意见。
+      - [x] `internal/review/render_test.go`、`internal/engine/run_test.go`（终止条件、持久化、缓存复用、从复核恢复）、
+            `internal/store/store_test.go` 的 findings 往返与旧库迁移
+- [x] **2.9** `go build ./... && go test ./... -race && gofmt -l . && go vet ./...` 全绿。
+- [x] **2.10** 端到端验证（用本地 OpenAI 兼容 stub 跑真实二进制，不依赖外部 API）：
+      - [x] 模型用自由文本作答时被提示补调 `submit_review`，补调后正常收尾
+      - [x] 复核并发执行，过滤掉刻意构造的"过度解读"意见，终端只展示保留项
+      - [x] anchor 反推行号正确（多次核对工作区文件真实行号）
+      - [x] 同样内容第二次运行零模型调用，输出与首次逐字节一致；数据库里被丢弃的意见带
+            `kept=false` 和 `critique_reason` 完整保留
+      - [ ] **待 Tan 用真实模型验收**：模型是否习惯性调用 `submit_review`（还是总要被提醒一轮）、
+            anchor 命中率（有多少条降级成文件级意见）、复核砍掉的是否都该砍
 - [ ] ⏸ **停下来，等待确认**：阶段二讲解 + 确认理解后再继续。
 
 ## 阶段三：审查流程可视化（Web）

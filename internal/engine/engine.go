@@ -51,25 +51,29 @@ type Deps struct {
 // completed，直接复用那次的结果、不再调用模型——常见于 git stash 之后又
 // stash pop 回同样的内容，或者反复对同一份暂存区改动跑审查的场景。
 //
-// 返回的 *store.Run 在成功时 Status 为 store.StatusCompleted，第二个返回值是模型
-// 提交的结构化审查结果。失败时返回的 error 会说明具体原因，对应的 Run 记录已经在
+// 返回的 *store.Run 在成功时 Status 为 store.StatusCompleted，审查结果可以从
+// run.Report() 取出。失败时返回的 error 会说明具体原因，对应的 Run 记录已经在
 // 返回前被标记为 store.StatusFailed 并落盘，不需要调用方再做任何清理。
-//
-// TODO(阶段二 2.6)：Report 目前只能随返回值传出，命中 completed 缓存时因此拿不到
-// 历史结果（见下方分支）。等 store.Run 加上 Findings/Summary 字段后，Report 就能
-// 随记录一起持久化，缓存命中的路径也能返回完整结果。
-func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, *review.Report, error) {
+func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
 	runKey := buildRunKey(repoAbs, branch)
 
 	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resume or start run: %w", err)
+		return nil, fmt.Errorf("resume or start run: %w", err)
 	}
 	if run.Status == store.StatusCompleted {
-		// Findings 尚未持久化，所以这里只能返回记录本身、Report 为 nil。
-		// 调用方需要能处理这种情况，直到 2.6 补上存储。
-		log.Info("命中内容相同的历史审查结果，直接复用", "runID", run.ID)
-		return run, nil, nil
+		log.Info("命中内容相同的历史审查结果，直接复用", "runID", run.ID, "findings", len(run.Findings))
+		return run, nil
+	}
+
+	// 命中一条初审已完成但复核没跑完的记录：跳过主循环，直接从复核阶段接着跑，
+	// 不让模型把整个 changeset 重审一遍。
+	if len(run.Findings) > 0 && !run.Critiqued {
+		log.Info("初审结果已存在但复核未完成，直接进入复核阶段", "runID", run.ID, "findings", len(run.Findings))
+		if err := finishWithCritique(ctx, deps, run, repoAbs, changes); err != nil {
+			return nil, err
+		}
+		return run, nil
 	}
 	msgs := run.Messages
 
@@ -84,7 +88,7 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 	for range maxToolLoopIterations {
 		resp, err := deps.LLM.Generate(genCtx, msgs, toolDefinitions)
 		if err != nil {
-			return nil, nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
+			return nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
 		}
 		msgs = append(msgs, *resp)
 		setMessages(ctx, deps.Store, run, msgs)
@@ -140,16 +144,18 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 
 		if report != nil {
 			log.Info("收到结构化审查结果", "findings", len(report.Findings))
-			final, err := critiqueReport(ctx, deps, *report, repoAbs, changes)
-			if err != nil {
-				return nil, nil, failRun(ctx, deps.Store, run, "critique review: %w", err)
+			// 先把初审结果落盘再跑复核：复核是一批重活（每条意见一个 tool loop），
+			// 跑到一半崩掉却没存初审结果的话，恢复时得让模型把整个 changeset 重审
+			// 一遍，白白浪费已经完成的初审。
+			setReport(ctx, deps.Store, run, *report)
+			if err := finishWithCritique(ctx, deps, run, repoAbs, changes); err != nil {
+				return nil, err
 			}
-			setStatus(ctx, deps.Store, run, store.StatusCompleted)
-			return run, &final, nil
+			return run, nil
 		}
 	}
 
-	return nil, nil, failRun(ctx, deps.Store, run, "exceeded max tool-call iterations (%d) without calling %s", maxToolLoopIterations, tool.SubmitReviewName)
+	return nil, failRun(ctx, deps.Store, run, "exceeded max tool-call iterations (%d) without calling %s", maxToolLoopIterations, tool.SubmitReviewName)
 }
 
 // buildRunKey 把分支名并入 repo 路径，让同一仓库不同分支的运行记录互不干扰——
@@ -206,6 +212,30 @@ func setMessages(ctx context.Context, db *store.Store, run *store.Run, messages 
 	if err := db.SaveRun(ctx, *run); err != nil {
 		log.Error("保存运行状态失败", "runID", run.ID, "error", err)
 	}
+}
+
+// setReport 把审查结果写进 run 并立即落盘，语义和失败处理方式与 setMessages 一致。
+func setReport(ctx context.Context, db *store.Store, run *store.Run, report review.Report) {
+	run.SetReport(report)
+	if err := db.SaveRun(ctx, *run); err != nil {
+		log.Error("保存审查结果失败", "runID", run.ID, "error", err)
+	}
+}
+
+// finishWithCritique 跑复核阶段，把结果落盘并把运行标记为完成。
+//
+// 复核失败时刻意**不**把运行标记为 failed，而是让它留在 in_progress：初审结果
+// 已经落盘了，这条记录的真实状态就是"初审已完成、复核未完成"。标记成 failed
+// 反而会让 resumeOrStartRun 把它当成不可复用的记录、下次重新跑一遍初审
+// （见那里对 StatusFailed 的处理），白白丢掉已经付过费的初审结果。
+func finishWithCritique(ctx context.Context, deps Deps, run *store.Run, repoAbs string, changes []gitdiff.Change) error {
+	final, err := critiqueReport(ctx, deps, run.Report(), repoAbs, changes)
+	if err != nil {
+		return fmt.Errorf("critique review: %w", err)
+	}
+	setReport(ctx, deps.Store, run, final)
+	setStatus(ctx, deps.Store, run, store.StatusCompleted)
+	return nil
 }
 
 // setStatus 更新 run 的 Status 并立即落盘，语义和失败处理方式与 setMessages 一致。

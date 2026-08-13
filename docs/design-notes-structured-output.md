@@ -4,6 +4,32 @@
 
 这份文档记录**阶段二实现过程中偏离原设计的决策**，以及每个决策背后的推理。原设计文档写于动手之前，这里记的是真正写代码时才暴露出来的问题。凡是与 `roadmap-v2.md` 冲突的，以本文档为准。
 
+## 阶段二最终形态
+
+一次审查的完整链路：
+
+```
+gitdiff.LoadStaged
+  → prompt.BuildInitial（要求以 submit_review 收尾）
+  → engine.Run 主循环：Generate ↔ read_file/glob/grep
+      模型调用 submit_review → 校验 + anchor 反推行号 → 立即落盘（Critiqued=false）
+  → engine.Critique：每条 Finding 一个独立 tool loop，并发（errgroup 限流）
+      复核者可见该条意见 + 所在文件 diff + 只读工具 → submit_verdict 给 keep/drop
+  → 落盘（Critiqued=true，含被丢弃项）→ review.Render 打印保留项
+```
+
+涉及的包：
+
+| 包 | 本阶段新增/改动 |
+|---|---|
+| `internal/review` | 新增：`review.go`（`Finding`/`Severity`/`Report`）、`anchor.go`（行号反推）、`render.go`（终端渲染） |
+| `internal/gitdiff` | 新增：`hunk.go`（unified diff 解析） |
+| `internal/tool` | 新增：`submitreview.go`、`critiqueverdict.go`；`Result` 加 `ReviewResult`/`CritiqueVerdict` 两个字段 |
+| `internal/engine` | 新增：`critique.go`（并发复核）；主循环终止条件改为收到审查结果；新增"从复核恢复"分支 |
+| `internal/store` | `Run` 加 `Findings`/`Summary`/`Critiqued`；三个新列 + 旧库迁移 |
+| `internal/config` | 新增可选的 `critique` 段（`concurrency` / `max_turns`） |
+| `internal/prompt` | system prompt 改为要求调用 `submit_review` 收尾 |
+
 ---
 
 ## 一、行号：不让模型报，用 anchor 反推
@@ -101,6 +127,14 @@ type Result struct {
 由此推出一条**比原计划更早的落盘时机**：初审 Report 一提交就应立即落盘，不等复核完成。因为复核是 N 条 finding × 每条一个 tool loop 的重活，跑到一半崩了却没存初审结果，恢复时就得让模型重审一遍，白白浪费已完成的初审。
 
 这也决定了 `Critiqued` 字段的归属：它属于 `store.Run`（表达"初审已完成、复核未完成"这个中间状态），不属于工具层。恢复逻辑随之清晰——命中 `in_progress` 的记录时，若 `Findings` 非空但 `Critiqued=false`，跳过主循环直接进复核阶段。
+
+### 实现时的两点补充
+
+**复核失败刻意不把运行标记为 `failed`。** 直觉上失败就该标记 failed，但 `resumeOrStartRun` 对 `StatusFailed` 的处理是"不复用、新建一条"——真标记成 failed，下次跑同样的内容就会把整个 changeset 重审一遍，白白丢掉已经付过费的初审结果。留在 `in_progress` 才是这条记录的真实状态："初审已完成、复核未完成"，下次正好命中上面那条恢复分支。
+
+**`engine.Run` 的返回值收敛回 `(*store.Run, error)`。** Findings 落盘之后，Report 不再需要单独一个返回值——调用方统一用 `run.Report()` 取，缓存命中和刚跑完两条路径拿到的结构完全一致。
+
+**四处 SELECT 的列清单抽成了 `runColumns` 常量。** 加一列本来要改四处，漏改一处就是运行期的"列数对不上"。
 
 ---
 

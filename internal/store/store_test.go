@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
+	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
@@ -67,7 +68,155 @@ func TestNewMigratesLegacyTableWithoutSnapshotHash(t *testing.T) {
 		t.Fatalf("LoadRunByHash after migration: %v", err)
 	}
 	if got == nil || got.ID != "run-1" {
-		t.Errorf("LoadRunByHash after migration = %+v, want run-1", got)
+		t.Fatalf("LoadRunByHash after migration = %+v, want run-1", got)
+	}
+
+	// 旧表同样缺少 findings/summary/critiqued 三列，迁移后它们应该有可用的默认值：
+	// 空意见列表、空 summary、未复核——这正是那些在结构化输出之前跑的运行的真实状态。
+	if len(got.Findings) != 0 {
+		t.Errorf("Findings = %+v, want empty for a migrated legacy row", got.Findings)
+	}
+	if got.Summary != "" {
+		t.Errorf("Summary = %q, want empty for a migrated legacy row", got.Summary)
+	}
+	if got.Critiqued {
+		t.Error("Critiqued = true, want false for a migrated legacy row")
+	}
+
+	// 迁移后写入带 Findings 的记录也必须正常工作。
+	withFindings := Run{
+		ID: "run-2", RepoPath: "/repo/a", Status: StatusCompleted, Snapshot: changes,
+		Findings:  []review.Finding{{ID: "f1", File: "main.go", Severity: review.SeverityError, Summary: "boom", Kept: true}},
+		Summary:   "one problem",
+		Critiqued: true,
+	}
+	if err := s.SaveRun(ctx, withFindings); err != nil {
+		t.Fatalf("SaveRun with findings after migration: %v", err)
+	}
+	reloaded, err := s.LoadRun(ctx, "run-2")
+	if err != nil {
+		t.Fatalf("LoadRun after migration: %v", err)
+	}
+	if len(reloaded.Findings) != 1 || reloaded.Findings[0].ID != "f1" {
+		t.Errorf("Findings = %+v, want the saved finding", reloaded.Findings)
+	}
+}
+
+func TestSaveAndLoadRunFindings(t *testing.T) {
+	findings := []review.Finding{
+		{ID: "f1", File: "a.go", Anchor: "return err", StartLine: 12, EndLine: 14,
+			Severity: review.SeverityError, Summary: "swallowed", Detail: "wrap it",
+			Kept: true, CritiqueReason: "verified against the code"},
+		{ID: "f2", File: "b.go", Severity: review.SeverityInfo, Summary: "nit",
+			Kept: false, CritiqueReason: "speculative"},
+	}
+
+	tests := []struct {
+		name string
+		run  Run
+		// wantFindings 是期望读回的意见条数。
+		wantFindings  int
+		wantSummary   string
+		wantCritiqued bool
+	}{
+		{
+			name: "round trips findings summary and critiqued",
+			run: Run{
+				ID: "r1", RepoPath: "/repo/a", Status: StatusCompleted,
+				Findings: findings, Summary: "two comments", Critiqued: true,
+			},
+			wantFindings: 2, wantSummary: "two comments", wantCritiqued: true,
+		},
+		{
+			name: "an initial review persists before critique runs",
+			run: Run{
+				ID: "r2", RepoPath: "/repo/a", Status: StatusInProgress,
+				Findings: findings[:1], Summary: "one comment", Critiqued: false,
+			},
+			wantFindings: 1, wantSummary: "one comment", wantCritiqued: false,
+		},
+		{
+			name:         "a run with no findings reads back as an empty slice, not null",
+			run:          Run{ID: "r3", RepoPath: "/repo/a", Status: StatusCompleted, Summary: "all clear", Critiqued: true},
+			wantFindings: 0, wantSummary: "all clear", wantCritiqued: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+
+			if err := s.SaveRun(ctx, tt.run); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+			got, err := s.LoadRun(ctx, tt.run.ID)
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got == nil {
+				t.Fatal("LoadRun returned nil, want the saved run")
+			}
+
+			if len(got.Findings) != tt.wantFindings {
+				t.Fatalf("len(Findings) = %d, want %d", len(got.Findings), tt.wantFindings)
+			}
+			if got.Summary != tt.wantSummary {
+				t.Errorf("Summary = %q, want %q", got.Summary, tt.wantSummary)
+			}
+			if got.Critiqued != tt.wantCritiqued {
+				t.Errorf("Critiqued = %v, want %v", got.Critiqued, tt.wantCritiqued)
+			}
+			// 每个字段都要原样读回——尤其是 Kept 和 CritiqueReason，被丢弃的意见
+			// 之所以落盘就是为了保住这两个字段。
+			for i := range got.Findings {
+				if got.Findings[i] != tt.run.Findings[i] {
+					t.Errorf("Findings[%d] = %+v, want %+v", i, got.Findings[i], tt.run.Findings[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRunReportRoundTrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		report review.Report
+	}{
+		{
+			name: "a critiqued report survives the round trip",
+			report: review.Report{
+				Findings: []review.Finding{
+					{ID: "f1", File: "a.go", Severity: review.SeverityError, Summary: "boom", Kept: true, CritiqueReason: "real"},
+					{ID: "f2", File: "b.go", Severity: review.SeverityInfo, Summary: "nit", Kept: false, CritiqueReason: "noise"},
+				},
+				Summary: "one real problem", Critiqued: true,
+			},
+		},
+		{
+			name:   "an empty report survives the round trip",
+			report: review.Report{Summary: "nothing to flag", Critiqued: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var run Run
+			run.SetReport(tt.report)
+
+			got := run.Report()
+			if got.Summary != tt.report.Summary || got.Critiqued != tt.report.Critiqued {
+				t.Errorf("Report() = %+v, want %+v", got, tt.report)
+			}
+			if len(got.Findings) != len(tt.report.Findings) {
+				t.Fatalf("len(Findings) = %d, want %d", len(got.Findings), len(tt.report.Findings))
+			}
+			for i := range got.Findings {
+				if got.Findings[i] != tt.report.Findings[i] {
+					t.Errorf("Findings[%d] = %+v, want %+v", i, got.Findings[i], tt.report.Findings[i])
+				}
+			}
+		})
 	}
 }
 
