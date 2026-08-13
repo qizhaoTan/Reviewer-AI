@@ -52,10 +52,47 @@ type Roles struct {
 	Primary string `json:"primary"`
 }
 
+// 复核阶段的默认参数。做成常量而非命令行 flag，是因为它们属于"这台机器上跑审查
+// 的固有参数"，不是每次调用都要变的东西——跟 timeout_seconds 是同一类。
+const (
+	// defaultCritiqueConcurrency 是同时进行的单条意见复核数量。
+	defaultCritiqueConcurrency = 10
+	// defaultCritiqueMaxTurns 是单条意见复核时 Generate 调用的最大轮数。
+	// 复核只需要查证一个具体的点，通常远用不完；给到和主循环同一量级是为了
+	// 不让"轮数不够"成为复核失败的常见原因。
+	defaultCritiqueMaxTurns = 30
+)
+
+// Critique 是复核阶段的可调参数，对应 config.json 里可选的 "critique" 段。
+// 整段缺省时全部走默认值。
+type Critique struct {
+	// Concurrency 是同时复核的意见条数，<=0 时取默认值。
+	Concurrency int `json:"concurrency"`
+	// MaxTurns 是单条意见复核的最大轮数，<=0 时取默认值。
+	MaxTurns int `json:"max_turns"`
+}
+
+// ConcurrencyOrDefault 返回生效的并发上限。
+func (c Critique) ConcurrencyOrDefault() int {
+	if c.Concurrency <= 0 {
+		return defaultCritiqueConcurrency
+	}
+	return c.Concurrency
+}
+
+// MaxTurnsOrDefault 返回生效的单条复核轮数上限。
+func (c Critique) MaxTurnsOrDefault() int {
+	if c.MaxTurns <= 0 {
+		return defaultCritiqueMaxTurns
+	}
+	return c.MaxTurns
+}
+
 // File 是 config.json 的顶层结构。
 type File struct {
-	Models map[string]ModelConfig `json:"models"`
-	Roles  Roles                  `json:"roles"`
+	Models   map[string]ModelConfig `json:"models"`
+	Roles    Roles                  `json:"roles"`
+	Critique Critique               `json:"critique"`
 }
 
 // DefaultPath 返回默认配置文件路径：$REVIEWER_AI_CONFIG（如设置）或 ~/.reviewer/config.json。

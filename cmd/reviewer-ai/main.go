@@ -70,15 +70,20 @@ func main() {
 	}
 	defer db.Close()
 
+	// 只读工具两个阶段共用；收尾工具各不相同——初审用 submit_review 提交意见，
+	// 复核用 submit_verdict 给单条意见下裁决。
+	readOnlyTools := []tool.ITool{
+		tool.ReadFileTool{},
+		tool.GlobTool{},
+		tool.GrepTool{},
+	}
 	deps := engine.Deps{
-		LLM:   llm,
-		Store: db,
-		Tools: []tool.ITool{
-			tool.ReadFileTool{},
-			tool.GlobTool{},
-			tool.GrepTool{},
-			tool.SubmitReviewTool{Changes: changes},
-		},
+		LLM:                 llm,
+		Store:               db,
+		Tools:               append(append([]tool.ITool{}, readOnlyTools...), tool.SubmitReviewTool{Changes: changes}),
+		CritiqueTools:       append(append([]tool.ITool{}, readOnlyTools...), tool.CritiqueVerdictTool{}),
+		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
+		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
 	}
 
 	run, report, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())

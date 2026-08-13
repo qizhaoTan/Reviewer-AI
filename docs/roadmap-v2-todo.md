@@ -32,9 +32,11 @@
       `result.ReviewResult != nil`；模型若用自由文本作答，回一条提示消息让它补调 `submit_review`，而不是把文本当成结果收下。
       新增 `internal/engine/run_test.go`（fake provider 驱动完整 tool loop）。
       *遗留*：初审 Report 目前只能随返回值传出，命中 completed 缓存时拿不到历史结果——待 2.6 加上存储后解决。
-- [ ] **2.5** 新建 `internal/review/critique.go`：**每条 Finding 起一个独立 tool loop 并发复核**
-      （errgroup 限流，默认并发 10 / 每条 30 轮，可配置；复核者可见该条 Finding + 所在文件 diff + 只读工具），
-      输出保留/丢弃二元判定 + 理由。参数见设计笔记"六"。
+- [x] **2.5** 新建 `internal/engine/critique.go`（**不是 review 包**：`tool` 已经导入 `review`，复核循环要用工具
+      就只能放在能同时导入两者的 engine 层）：每条 Finding 起一个独立 tool loop 并发复核，errgroup 限流。
+      配套 `internal/tool/critiqueverdict.go`（`submit_verdict` 工具，结果走 `Result.CritiqueVerdict`）、
+      `config.Critique` 配置段（`concurrency` / `max_turns`，默认 10 / 30）。参数见设计笔记"六"。
+      单条复核失败时**保留**该意见并记录原因，不因基础设施抖动而静默吞掉审查意见。
 - [ ] **2.6** 修改 `internal/store`：`Run` 加 `Findings []review.Finding`、`Summary`、`Critiqued` 字段
       （含 `Kept=false` 的被丢弃项也落盘），数据库加列 + 旧库迁移；命中 completed 缓存时复用 `Findings` 而非最后一条消息。
 - [x] **2.7** 终端输出：`internal/review/render.go` 把 `Report` 渲染成文本列表
@@ -42,7 +44,8 @@
 - [ ] **2.8** 新建/补充测试：表驱动覆盖参数解析、非法输入。
       - [x] `internal/review/review_test.go`、`internal/review/anchor_test.go`、`internal/gitdiff/hunk_test.go`
       - [x] `internal/tool/submitreview_test.go`（含单实例并发共享的 `-race` 测试）
-      - [ ] `internal/review/critique_test.go`（随 2.5 一起做）
+      - [x] `internal/engine/critique_test.go`（并发上限、失败保留、轮数上限、复核提示词措辞）、
+            `internal/tool/critiqueverdict_test.go`、`config_test.go` 的 critique 段
 - [ ] **2.9** `go build ./... && go test ./... && gofmt -l . && go vet ./...` 全绿。
 - [ ] **2.10** 手工验证：真实跑一次确认模型调用 `submit_review` 而非自由文本；构造一个容易被误判的改动，观察复审是否过滤掉了过度解读的意见。
 - [ ] ⏸ **停下来，等待确认**：阶段二讲解 + 确认理解后再继续。

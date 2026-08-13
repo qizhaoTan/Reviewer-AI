@@ -20,13 +20,24 @@ import (
 )
 
 // maxToolLoopIterations 是单次审查运行里 Generate 调用的最大轮数，防止模型无限循环调用工具。
-const maxToolLoopIterations = 30
+const maxToolLoopIterations = 60
 
 // Deps 是 Run 所需的外部依赖，由调用方组装好后传入。
 type Deps struct {
 	LLM   schema.IProvider
 	Store *store.Store
 	Tools []tool.ITool
+
+	// CritiqueTools 是复核阶段可用的工具：只读工具加上 submit_verdict。
+	// 与 Tools 分开是因为两个阶段的收尾工具不同——复核者不该看到
+	// submit_review（它无权改写审查结论），初审也不该看到 submit_verdict。
+	// 留空则跳过复核。
+	CritiqueTools []tool.ITool
+
+	// CritiqueConcurrency / CritiqueMaxTurns 见 CritiqueDeps 上的同名字段，
+	// 由调用方从配置读出后传入。
+	CritiqueConcurrency int
+	CritiqueMaxTurns    int
 }
 
 // Run 执行一次完整的审查：查找或新建一条 Run 记录，驱动 tool loop 直到模型
@@ -129,8 +140,12 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 
 		if report != nil {
 			log.Info("收到结构化审查结果", "findings", len(report.Findings))
+			final, err := critiqueReport(ctx, deps, *report, repoAbs, changes)
+			if err != nil {
+				return nil, nil, failRun(ctx, deps.Store, run, "critique review: %w", err)
+			}
 			setStatus(ctx, deps.Store, run, store.StatusCompleted)
-			return run, report, nil
+			return run, &final, nil
 		}
 	}
 

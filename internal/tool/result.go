@@ -27,4 +27,9 @@ type Result struct {
 	// 换来的是：调用方靠 ReviewResult != nil 就能判断审查是否已提交，
 	// 不必按工具名做字符串比较。
 	ReviewResult *review.Report
+
+	// CritiqueVerdict 是复核者对单条意见的裁决，只有 submit_verdict 会填，
+	// 其余工具留 nil。语义和取舍同 ReviewResult——复核循环靠它非 nil
+	// 判断这一条已经裁决完毕。
+	CritiqueVerdict *Verdict
 }

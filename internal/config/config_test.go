@@ -186,3 +186,95 @@ func TestModelConfig_Timeout(t *testing.T) {
 		})
 	}
 }
+
+func TestCritique_ConcurrencyOrDefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		concurrency int
+		want        int
+	}{
+		{name: "unset falls back to default", concurrency: 0, want: defaultCritiqueConcurrency},
+		{name: "negative falls back to default", concurrency: -3, want: defaultCritiqueConcurrency},
+		{name: "explicit value preserved", concurrency: 4, want: 4},
+		{name: "one is a valid explicit value meaning fully serial", concurrency: 1, want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Critique{Concurrency: tt.concurrency}
+			if got := c.ConcurrencyOrDefault(); got != tt.want {
+				t.Fatalf("ConcurrencyOrDefault() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCritique_MaxTurnsOrDefault(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxTurns int
+		want     int
+	}{
+		{name: "unset falls back to default", maxTurns: 0, want: defaultCritiqueMaxTurns},
+		{name: "negative falls back to default", maxTurns: -1, want: defaultCritiqueMaxTurns},
+		{name: "explicit value preserved", maxTurns: 8, want: 8},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Critique{MaxTurns: tt.maxTurns}
+			if got := c.MaxTurnsOrDefault(); got != tt.want {
+				t.Fatalf("MaxTurnsOrDefault() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadCritiqueSection(t *testing.T) {
+	tests := []struct {
+		name            string
+		body            string
+		wantConcurrency int
+		wantMaxTurns    int
+	}{
+		{
+			name: "explicit critique settings are parsed",
+			body: `{"models":{"m":{"provider":"openai"}},"roles":{"primary":"m"},
+				"critique":{"concurrency":3,"max_turns":7}}`,
+			wantConcurrency: 3,
+			wantMaxTurns:    7,
+		},
+		{
+			name:            "a config without a critique section falls back to defaults",
+			body:            `{"models":{"m":{"provider":"openai"}},"roles":{"primary":"m"}}`,
+			wantConcurrency: defaultCritiqueConcurrency,
+			wantMaxTurns:    defaultCritiqueMaxTurns,
+		},
+		{
+			name: "a partial critique section only overrides what it sets",
+			body: `{"models":{"m":{"provider":"openai"}},"roles":{"primary":"m"},
+				"critique":{"concurrency":2}}`,
+			wantConcurrency: 2,
+			wantMaxTurns:    defaultCritiqueMaxTurns,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			f, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got := f.Critique.ConcurrencyOrDefault(); got != tt.wantConcurrency {
+				t.Errorf("Concurrency = %d, want %d", got, tt.wantConcurrency)
+			}
+			if got := f.Critique.MaxTurnsOrDefault(); got != tt.wantMaxTurns {
+				t.Errorf("MaxTurns = %d, want %d", got, tt.wantMaxTurns)
+			}
+		})
+	}
+}
