@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -487,6 +488,69 @@ func TestLoadRunByHash(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListAllRuns(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   int
+		wantIDs []string
+	}{
+		{
+			name:    "no limit returns every repo in descending update order",
+			limit:   0,
+			wantIDs: []string{"b-2", "a-2", "b-1", "a-1"},
+		},
+		{
+			name:    "limit caps result count across repos",
+			limit:   2,
+			wantIDs: []string{"b-2", "a-2"},
+		},
+	}
+
+	s := newTestStore(t)
+	ctx := context.Background()
+	// 交替写入两个 repoPath，这样"跨仓库"和"按更新时间倒序"必须同时成立
+	// 才能得到期望顺序——只要实现漏了任一条，用例就会失败。
+	for _, id := range []string{"a-1", "b-1", "a-2", "b-2"} {
+		repo := "/repo/a#main"
+		if strings.HasPrefix(id, "b-") {
+			repo = "/repo/b#feature"
+		}
+		if err := s.SaveRun(ctx, Run{ID: id, RepoPath: repo, Status: StatusCompleted}); err != nil {
+			t.Fatalf("seed SaveRun(%s): %v", id, err)
+		}
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runs, err := s.ListAllRuns(ctx, tt.limit)
+			if err != nil {
+				t.Fatalf("ListAllRuns: %v", err)
+			}
+			if len(runs) != len(tt.wantIDs) {
+				t.Fatalf("ListAllRuns returned %d runs, want %d", len(runs), len(tt.wantIDs))
+			}
+			for i, id := range tt.wantIDs {
+				if runs[i].ID != id {
+					t.Errorf("runs[%d].ID = %q, want %q", i, runs[i].ID, id)
+				}
+			}
+		})
+	}
+
+	// ListAllRuns 存在的理由：ListRuns 的空 repoPath 不是通配符。这条断言
+	// 固定住该语义，防止有人"顺手"把 ListRuns 改成空值即全量，从而让两个
+	// 方法悄悄重叠。
+	t.Run("empty repoPath is not a wildcard for ListRuns", func(t *testing.T) {
+		runs, err := s.ListRuns(ctx, "", 0)
+		if err != nil {
+			t.Fatalf("ListRuns: %v", err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("ListRuns with empty repoPath returned %d runs, want 0", len(runs))
+		}
+	})
 }
 
 func TestListRuns(t *testing.T) {

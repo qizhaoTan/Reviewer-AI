@@ -63,14 +63,37 @@
 
 ## 阶段三：审查流程可视化（Web）
 
-- [ ] **3.1** 新建 `internal/web/server.go`：`RunSource` 接口、`Server`/`NewServer`/`ListenAndServe`。
-- [ ] **3.2** 新建 `internal/web/templates.go`：列表页 + 详情页的 `html/template` 模板（参考 `ai-assistant/web/templates.go` 的结构）。
-- [ ] **3.3** 列表页：按 repo 路径、时间倒序展示历史 `Run`，含状态、时间、Findings 数量。
-- [ ] **3.4** 详情页：完整消息历史（含每次工具调用的参数/结果）+ 结构化 Findings（复审前后对比）。
-- [ ] **3.5** 修改 `cmd/reviewer-ai/main.go`：加 `reviewer web -addr :8090` 子命令分发。
-- [ ] **3.6** 新建 `internal/web/server_test.go`：用一个假的 `RunSource` 实现测试 handler 行为（参考 `ai-assistant/web/server_test.go` 的测法）。
-- [ ] **3.7** `go build ./... && go test ./... && gofmt -l . && go vet ./...` 全绿。
-- [ ] **3.8** 手工验证：`reviewer web` 启动后浏览器打开，确认能看到阶段一二跑出来的历史记录，详情页信息完整可读。
+- [x] **3.0**（计划外前置）`internal/store` 新增 `ListAllRuns(ctx, limit)`：跨仓库、跨分支列出全部记录。
+      原设计让 Web 用 `ListRuns(ctx, repoPath, limit)`，但它按 `repo_path` **精确**过滤，而存进去的是
+      `buildRunKey` 拼出的 `路径#分支` 复合键——列表页作为总入口没有"当前仓库"可传，传空串会得到空列表。
+      单开一个方法而不是让空 `repoPath` 表示通配：后者让同一参数背两种语义，而引擎恢复流程正依赖精确语义。
+      配套测试固定住"空 repoPath 不是通配符"这条约定。
+- [x] **3.1** 新建 `internal/web/server.go`：`RunSource` 接口、`Server`/`NewServer`/`ListenAndServe`。
+      附带 `Handler()` 单独暴露路由，让测试不必真的监听端口。
+- [x] **3.2** 新建 `internal/web/templates.go`：列表页 + 详情页的 `html/template` 模板，共用一份 `sharedCSS`。
+- [x] **3.3** 列表页：全部历史 `Run` 按更新时间倒序，含状态徽标、时间、仓库/分支（复合键拆两列展示）、
+      文件数、保留/丢弃意见数。
+- [x] **3.4** 详情页：元信息 + 整体评价 + **保留组 / 被复核丢弃组分开展示**（含 anchor 与复核理由）
+      + 完整消息历史（含每次工具调用的名称、ID、参数）。
+- [x] **3.5** 修改 `cmd/reviewer-ai/main.go`：`main` 拆成 `runReview`/`runWeb`，按 `os.Args[1] == "web"` 分发，
+      各自用独立 `flag.NewFlagSet`；不带子命令时行为与之前完全一致。
+- [x] **3.6** 新建 `internal/web/server_test.go`：假 `RunSource` 驱动，覆盖列表/详情渲染、
+      复核未执行时的计数口径、404/400/500 三条错误路径、模型输出的 HTML 转义、`splitRunKey` 边界。
+- [x] **3.7** `go build ./... && go test ./... -race && gofmt -l . && go vet ./...` 全绿。
+- [x] **3.8** 手工验证：`reviewer-ai web -addr :8099` 对真实 `~/.reviewer/runs.db` 跑通——
+      旧库（缺 findings/summary/critiqued 三列）自动迁移成功，3 条历史记录正常展示，
+      详情页完整渲染一次 43 条消息、32 次工具调用的真实运行；404/400/500 状态码均正确。
+- [x] **3.9**（Tan 追加）启动 `web` 子命令后自动打开浏览器：按 `runtime.GOOS` 选
+      `open`/`xdg-open`/`rundll32`，都是系统自带命令，不引第三方库。在独立 goroutine 里延迟
+      300ms 再开（`ListenAndServe` 阻塞，且要等端口就绪，否则浏览器可能抢在监听前拿到连接拒绝）。
+      打不开浏览器只警告不退出——URL 已经打在 stderr 上。加 `-no-open` 供无头环境关闭。
+- [x] **3.10**（Tan 追加）详情页分级折叠，用原生 `<details>`，零 JS：
+      - 「保留的意见」默认**展开**（这是打开页面的主要目的），「被复核丢弃的意见」「消息历史」默认**折叠**
+      - 单条意见：级别 + 文件行号 + 一句话摘要**常显**，detail/anchor/复核理由折叠；三者皆空时不渲染折叠框
+      - 单条消息再折叠一层：角色徽标、tool_call_id、工具名、正文前 80 字预览常显（换行折成空格、按 rune 截断）
+      - 折叠只是视觉折叠，内容仍在 HTML 里——浏览器页内搜索能命中，无需任何请求即可展开（有测试固定）
+      - 验证：真实 43 条消息的运行上 1 个区块展开 / 2 个折叠 / 43 条消息逐条折叠；
+        对「全部折叠」和「全部展开」两个方向都做了变异测试，确认断言真的会失败
 - [ ] ⏸ **停下来，等待确认**：阶段三讲解 + 确认理解后再继续。
 
 ## 阶段四：用户交互（reply / review）+ 增量重审

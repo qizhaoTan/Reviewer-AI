@@ -311,15 +311,41 @@ func (s *Store) LoadRunByHash(ctx context.Context, repoPath, snapshotHash string
 	return run, nil
 }
 
-// ListRuns 按 repoPath 列出历史运行，按更新时间倒序，最多 limit 条
-// （limit <= 0 时不限制）。供 Web 可视化的列表页使用。
+// ListRuns 按 repoPath 精确列出历史运行，按更新时间倒序，最多 limit 条
+// （limit <= 0 时不限制）。repoPath 必须是完整的 runKey（引擎侧是
+// "仓库绝对路径#分支名"），传空字符串匹配不到任何记录——想列出全部记录
+// 请用 ListAllRuns，不要指望空字符串被当成通配。
 func (s *Store) ListRuns(ctx context.Context, repoPath string, limit int) ([]Run, error) {
-	query := `
-		SELECT ` + runColumns + `
-		FROM runs WHERE repo_path = ?
-		ORDER BY updated_at DESC
-	`
-	args := []any{repoPath}
+	runs, err := s.queryRuns(ctx, `WHERE repo_path = ?`, limit, repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("list runs for %s: %w", repoPath, err)
+	}
+	return runs, nil
+}
+
+// ListAllRuns 跨仓库、跨分支列出全部历史运行，按更新时间倒序，最多 limit 条
+// （limit <= 0 时不限制）。供 Web 列表页作总入口使用：那里没有"当前仓库"
+// 的概念，用户要看的就是这个库里存过的所有运行。
+//
+// 单独开一个方法而不是让 ListRuns 的空 repoPath 表示"不过滤"：后者让同一个
+// 参数背两种语义，调用方少写一个值就从"精确查询"静默变成"全表扫描"，而
+// 引擎恢复流程恰恰依赖 ListRuns 的精确语义。
+func (s *Store) ListAllRuns(ctx context.Context, limit int) ([]Run, error) {
+	runs, err := s.queryRuns(ctx, "", limit)
+	if err != nil {
+		return nil, fmt.Errorf("list all runs: %w", err)
+	}
+	return runs, nil
+}
+
+// queryRuns 是列表类查询的共用实现：拼 where 子句与可选的 LIMIT，逐行 scan。
+// where 为空表示不过滤；args 必须与 where 里的占位符一一对应。
+func (s *Store) queryRuns(ctx context.Context, where string, limit int, args ...any) ([]Run, error) {
+	query := `SELECT ` + runColumns + ` FROM runs `
+	if where != "" {
+		query += where + ` `
+	}
+	query += `ORDER BY updated_at DESC `
 	if limit > 0 {
 		query += `LIMIT ?`
 		args = append(args, limit)
@@ -327,7 +353,7 @@ func (s *Store) ListRuns(ctx context.Context, repoPath string, limit int) ([]Run
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list runs for %s: %w", repoPath, err)
+		return nil, err
 	}
 	defer rows.Close()
 
