@@ -43,6 +43,26 @@ func TestSystemPromptRequiresSubmitReview(t *testing.T) {
 			contains: "anchor field",
 			why:      "anchor 是定位的唯一输入",
 		},
+		{
+			name:     "tells the model not to repeat a search it already ran",
+			contains: "never re-run a search you have already run",
+			why:      "实测中同一个符号被 grep 了 6 次，历史结果明明还在上下文里",
+		},
+		{
+			name:     "tells the model to weigh each call against the verdict",
+			contains: "could change your verdict",
+			why:      "给'还要不要再查一次'一个判断锚点，否则模型只会一路往下查",
+		},
+		{
+			name:     "frames finding nothing as a successful review",
+			contains: "finding nothing is a successful review",
+			why:      "meticulous reviewer 的人设让交白卷像失职，得显式许可它收工",
+		},
+		{
+			name:     "forbids purely forward-looking suggestions",
+			contains: "do not file a finding that merely suggests a future refactor",
+			why:      "这类噪音意见让作者无事可做，从源头掐掉比事后让复核砍更省一轮",
+		},
 	}
 
 	lower := strings.ToLower(systemPrompt)
@@ -80,8 +100,11 @@ func TestBuildInitial(t *testing.T) {
 			name:           "empty language prompt leaves the system prompt untouched",
 			changes:        []gitdiff.Change{{Status: "M", Path: "a.go", Patch: "-x\n+y\n"}},
 			languagePrompt: "",
-			systemSuffix:   "silence is not.\n",
-			userContains:   []string{"a.go"},
+			// 断言"原样传出"而不是写死末行内容：这条用例要守的是"不加语言约束时
+			// 不动 system prompt"，跟末行恰好是哪句话无关。写死末行会让每次调整
+			// 提示词措辞都误报一次失败，而那正是这个包设计上鼓励反复迭代的部分。
+			systemSuffix: systemPrompt,
+			userContains: []string{"a.go"},
 		},
 		{
 			name: "single change",

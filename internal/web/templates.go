@@ -389,7 +389,7 @@ const runHTML = `{{define "findings"}}
   </details>
 
   <details class="section">
-    <summary><h2>消息历史 <span class="count">（{{len .Run.Messages}} 条 · 工具结果内容已在落盘时压缩为占位符）</span></h2></summary>
+    <summary><h2>消息历史 <span class="count">（{{len .Run.Messages}} 条{{if .ToolResultsCompacted}} · 工具结果内容已在落盘时压缩为占位符{{end}}）</span></h2></summary>
     <div class="card">
       {{range .Run.Messages}}
         {{/* 消息历史展开后仍然很长（真实运行 40+ 条起步），所以每条消息

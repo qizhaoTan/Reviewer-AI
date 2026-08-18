@@ -459,6 +459,14 @@ const toolResultPlaceholder = "内容已过期，如需要请重新调用工具"
 // 真实输出内容，占位符会掩盖问题。压缩逻辑本身保留，待调试阶段结束后重新启用。
 const compactionEnabled = false
 
+// ToolResultsCompacted 报告工具结果落盘时是否会被替换成占位符。
+//
+// 导出给展现层用：Web 详情页要在消息历史标题上说明"你看到的工具结果是不是
+// 真实内容"。这个说明必须跟 compactionEnabled 联动而不是写死在模板里——
+// 写死的那版曾经在开关关掉之后还宣称"已压缩为占位符"，调试时会让人以为
+// 上下文被截断了，而实际上并没有。
+func ToolResultsCompacted() bool { return compactionEnabled }
+
 func compactToolResults(messages []schema.Message) []schema.Message {
 	if !compactionEnabled {
 		return messages

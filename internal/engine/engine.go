@@ -91,7 +91,10 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 	genCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	for range maxToolLoopIterations {
+	// deduper 跨轮记录已执行过的工具调用，用于拦截模型的重复搜索，见 dedup.go。
+	deduper := newCallDeduper()
+
+	for iteration := 1; iteration <= maxToolLoopIterations; iteration++ {
 		resp, err := deps.LLM.Generate(genCtx, msgs, toolDefinitions)
 		if err != nil {
 			return nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
@@ -120,6 +123,18 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 
 		var report *review.Report
 		for _, tc := range resp.ToolCalls {
+			// 参数完全相同的调用已经成功跑过：不再执行，回一句提醒让模型去翻上文。
+			// 拦下来省的不是这次 grep 的几毫秒，而是它引出的后续模型往返。
+			if round, repeated := deduper.firstSeenRound(tc); repeated {
+				log.Info("拦截重复的工具调用", "tool", tc.Name, "arguments", tc.Arguments, "firstSeenRound", round)
+				msgs = append(msgs, schema.Message{
+					Role:       schema.RoleUser,
+					Content:    repeatNotice(tc, round),
+					ToolCallID: tc.ID,
+				})
+				continue
+			}
+
 			var result tool.Result
 			if t, err := tool.FindToolByName(deps.Tools, tc.Name); err != nil {
 				result = tool.Result{
@@ -139,6 +154,12 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 			// 同一轮里若提交了多次，以最后一次为准（与工具自身的覆盖语义一致）。
 			if result.ReviewResult != nil {
 				report = result.ReviewResult
+			}
+
+			// 只登记成功的只读调用：失败的调用（比如正则写错）模型有权改了再试；
+			// 带 ReviewResult 的 submit_review 是收尾动作，本来也不会有第二次。
+			if !result.IsError && result.ReviewResult == nil {
+				deduper.record(tc, iteration)
 			}
 			msgs = append(msgs, schema.Message{
 				Role:       schema.RoleUser,

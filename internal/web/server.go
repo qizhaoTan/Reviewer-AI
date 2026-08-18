@@ -203,6 +203,10 @@ type runPage struct {
 	// 重审按钮。渲染一个点了必然报错的按钮，比不渲染更糟。
 	Interactive bool
 
+	// ToolResultsCompacted 表示消息历史里的工具结果是否已被替换成占位符。
+	// 取自 store 的实际开关而不是在模板里写死，见 store.ToolResultsCompacted。
+	ToolResultsCompacted bool
+
 	// Notice / Error 是上一次操作的结果提示，通过重定向后的查询参数带回来。
 	Notice string
 	Error  string
@@ -229,9 +233,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	repoPath, branch := splitRunKey(run.RepoPath)
 	page := runPage{
 		Run: *run, RepoPath: repoPath, Branch: branch,
-		Interactive: s.reviewer != nil,
-		Notice:      r.URL.Query().Get("notice"),
-		Error:       r.URL.Query().Get("error"),
+		Interactive:          s.reviewer != nil,
+		ToolResultsCompacted: store.ToolResultsCompacted(),
+		Notice:               r.URL.Query().Get("notice"),
+		Error:                r.URL.Query().Get("error"),
 	}
 	for _, f := range run.Findings {
 		// 与 countFindings 同一套口径：复核没跑完就全部按"保留"展示。
