@@ -278,3 +278,37 @@ func TestLoadCritiqueSection(t *testing.T) {
 		})
 	}
 }
+
+func TestFile_LanguagePromptOrDefault(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+
+	tests := []struct {
+		name string
+		file File
+		want string
+	}{
+		{
+			name: "unset falls back to the default Chinese prompt",
+			file: File{},
+			want: defaultLanguagePrompt,
+		},
+		{
+			name: "explicit value preserved",
+			file: File{LanguagePrompt: ptr("- Your response needs to be in English!!!")},
+			want: "- Your response needs to be in English!!!",
+		},
+		{
+			name: "explicit empty string means no language constraint",
+			file: File{LanguagePrompt: ptr("")},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.file.LanguagePromptOrDefault(); got != tt.want {
+				t.Fatalf("LanguagePromptOrDefault() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

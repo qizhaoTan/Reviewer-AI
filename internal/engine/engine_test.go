@@ -126,7 +126,7 @@ func TestResumeOrStartRun(t *testing.T) {
 				}
 			}
 
-			got, err := resumeOrStartRun(ctx, db, runKey, tt.changes)
+			got, err := resumeOrStartRun(ctx, db, runKey, tt.changes, "")
 			if err != nil {
 				t.Fatalf("resumeOrStartRun: %v", err)
 			}
@@ -169,7 +169,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	const runKey = "/repo/a#main"
 
 	// 1. 审查 A，跑完。
-	runA, err := resumeOrStartRun(ctx, db, runKey, snapshotA)
+	runA, err := resumeOrStartRun(ctx, db, runKey, snapshotA, "")
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(A): %v", err)
 	}
@@ -180,7 +180,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	}
 
 	// 2. git stash：暂存区变成 B，审查 B（成为"最新"记录）。
-	runB, err := resumeOrStartRun(ctx, db, runKey, snapshotB)
+	runB, err := resumeOrStartRun(ctx, db, runKey, snapshotB, "")
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(B): %v", err)
 	}
@@ -189,7 +189,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	}
 
 	// 3. git stash pop：暂存区变回 A。即使 B 现在是"最新"记录，也应该找到 A 的旧结果。
-	gotA, err := resumeOrStartRun(ctx, db, runKey, snapshotA)
+	gotA, err := resumeOrStartRun(ctx, db, runKey, snapshotA, "")
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(A again): %v", err)
 	}

@@ -27,15 +27,32 @@ When you are done investigating, submit your review by calling the submit_review
 
 Two things about submit_review:
 - Report each problem as a separate entry in findings. To point at the code a finding is about, copy those exact source lines into the anchor field; do not try to work out line numbers yourself, they are computed from the snippet you copy.
-- If the changeset looks fine, still call submit_review with an empty findings array and use summary to say why. An empty review is a valid conclusion; silence is not.`
+- If the changeset looks fine, still call submit_review with an empty findings array and use summary to say why. An empty review is a valid conclusion; silence is not.
+`
 
 // BuildInitial 把暂存区变更转换为发给模型的初始消息列表：一条 system 消息设定角色与工具使用方式，
 // 一条 user 消息携带具体的 diff 内容。
-func BuildInitial(changes []gitdiff.Change) []schema.Message {
+//
+// languagePrompt 由调用方从配置读出，追加到 system prompt 末尾；传空串表示不加
+// 语言约束。
+func BuildInitial(changes []gitdiff.Change, languagePrompt string) []schema.Message {
 	return []schema.Message{
-		{Role: schema.RoleSystem, Content: systemPrompt},
+		{Role: schema.RoleSystem, Content: WithLanguage(systemPrompt, languagePrompt)},
 		{Role: schema.RoleUser, Content: formatChanges(changes)},
 	}
+}
+
+// WithLanguage 把语言约束追加到一段 system prompt 末尾。
+//
+// 放在 prompt 包里导出，是为了让初审和复核两个阶段共用同一套拼接规则——
+// 语言约束必须落在最后一行，模型对提示词尾部的指令更敏感，而两处各写一遍
+// 拼接逻辑迟早会分叉。
+func WithLanguage(systemPrompt, languagePrompt string) string {
+	languagePrompt = strings.TrimSpace(languagePrompt)
+	if languagePrompt == "" {
+		return systemPrompt
+	}
+	return strings.TrimRight(systemPrompt, "\n") + "\n\n" + languagePrompt
 }
 
 // formatChanges 把每个变更渲染为 Markdown 片段，供 user 消息使用。

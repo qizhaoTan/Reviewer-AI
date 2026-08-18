@@ -9,6 +9,7 @@ import (
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
 	"github.com/qizhaoTan/Reviewer-AI/internal/log"
+	"github.com/qizhaoTan/Reviewer-AI/internal/prompt"
 	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 	"github.com/qizhaoTan/Reviewer-AI/internal/tool"
@@ -31,6 +32,8 @@ func critiqueReport(ctx context.Context, deps Deps, report review.Report, repoRo
 		RepoRoot:    repoRoot,
 		Concurrency: deps.CritiqueConcurrency,
 		MaxTurns:    deps.CritiqueMaxTurns,
+
+		LanguagePrompt: deps.LanguagePrompt,
 	}, report, changes)
 }
 
@@ -53,6 +56,10 @@ type CritiqueDeps struct {
 
 	// MaxTurns 是单条意见复核的最大轮数，<=0 时取 fallbackCritiqueMaxTurns。
 	MaxTurns int
+
+	// LanguagePrompt 是追加到复核 system prompt 末尾的语言约束，留空表示不加。
+	// 见 Deps.LanguagePrompt。
+	LanguagePrompt string
 }
 
 // fallbackCritiqueMaxTurns 只在调用方没有填 CritiqueDeps.MaxTurns 时兜底。
@@ -126,7 +133,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 		maxTurns = fallbackCritiqueMaxTurns
 	}
 
-	msgs := buildCritiqueMessages(f, patch)
+	msgs := buildCritiqueMessages(f, patch, deps.LanguagePrompt)
 	toolDefinitions := make([]schema.ToolDefinition, len(deps.Tools))
 	for i, t := range deps.Tools {
 		toolDefinitions[i] = t.Definition()
@@ -188,7 +195,7 @@ You cannot edit the comment or add new ones. Your only output is a verdict: call
 // buildCritiqueMessages 拼装单条意见的复核上下文：只给这一条意见和它所在文件的
 // diff，不给整个 changeset。上下文小意味着复核者不容易被别的文件带偏，也让并发
 // 复核的成本随意见条数线性增长而不是平方增长。
-func buildCritiqueMessages(f review.Finding, patch string) []schema.Message {
+func buildCritiqueMessages(f review.Finding, patch, languagePrompt string) []schema.Message {
 	var b strings.Builder
 
 	b.WriteString("## Comment under examination\n\n")
@@ -218,7 +225,7 @@ func buildCritiqueMessages(f review.Finding, patch string) []schema.Message {
 	b.WriteString("\nDecide whether this comment should reach the author, then call submit_verdict.")
 
 	return []schema.Message{
-		{Role: schema.RoleSystem, Content: critiqueSystemPrompt},
+		{Role: schema.RoleSystem, Content: prompt.WithLanguage(critiqueSystemPrompt, languagePrompt)},
 		{Role: schema.RoleUser, Content: b.String()},
 	}
 }

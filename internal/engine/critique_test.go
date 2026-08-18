@@ -321,12 +321,23 @@ func TestCritiqueMaxTurns(t *testing.T) {
 
 func TestBuildCritiqueMessages(t *testing.T) {
 	tests := []struct {
-		name         string
-		finding      review.Finding
-		patch        string
-		wantContains []string
-		wantExcludes []string
+		name           string
+		finding        review.Finding
+		patch          string
+		languagePrompt string
+		systemSuffix   string // 非空时断言复核 system prompt 以此结尾
+		wantContains   []string
+		wantExcludes   []string
 	}{
+		{
+			name: "language prompt is appended to the critique system prompt",
+			finding: review.Finding{
+				ID: "f1", File: "config.go", Severity: review.SeverityInfo, Summary: "note",
+			},
+			patch:          testPatch,
+			languagePrompt: "- Your response needs to be in Chinese!!!",
+			systemSuffix:   "\n\n- Your response needs to be in Chinese!!!",
+		},
 		{
 			name: "includes the finding, its anchor and the file diff",
 			finding: review.Finding{
@@ -367,12 +378,18 @@ func TestBuildCritiqueMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := buildCritiqueMessages(tt.finding, tt.patch)
+			msgs := buildCritiqueMessages(tt.finding, tt.patch, tt.languagePrompt)
 			if len(msgs) != 2 {
 				t.Fatalf("len(msgs) = %d, want 2", len(msgs))
 			}
 			if msgs[0].Role != schema.RoleSystem || msgs[0].Content == "" {
 				t.Errorf("msgs[0] = %+v, want a non-empty system message", msgs[0])
+			}
+			if tt.systemSuffix != "" && !strings.HasSuffix(msgs[0].Content, tt.systemSuffix) {
+				t.Errorf("system message does not end with %q:\n%s", tt.systemSuffix, msgs[0].Content)
+			}
+			if tt.languagePrompt == "" && msgs[0].Content != critiqueSystemPrompt {
+				t.Error("empty language prompt should leave the critique system prompt untouched")
 			}
 			if msgs[1].Role != schema.RoleUser {
 				t.Errorf("msgs[1].Role = %q, want %q", msgs[1].Role, schema.RoleUser)

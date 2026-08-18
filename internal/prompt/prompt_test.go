@@ -57,15 +57,31 @@ func TestSystemPromptRequiresSubmitReview(t *testing.T) {
 
 func TestBuildInitial(t *testing.T) {
 	tests := []struct {
-		name         string
-		changes      []gitdiff.Change
-		userContains []string
-		userExcludes []string
+		name           string
+		changes        []gitdiff.Change
+		languagePrompt string
+		systemSuffix   string // 非空时断言 system prompt 以此结尾
+		userContains   []string
+		userExcludes   []string
 	}{
 		{
 			name:         "no changes",
 			changes:      nil,
 			userContains: []string{"No staged changes."},
+		},
+		{
+			name:           "language prompt is appended to the end of the system prompt",
+			changes:        []gitdiff.Change{{Status: "M", Path: "a.go", Patch: "-x\n+y\n"}},
+			languagePrompt: "- Your response needs to be in Chinese!!!",
+			systemSuffix:   "\n\n- Your response needs to be in Chinese!!!",
+			userContains:   []string{"a.go"},
+		},
+		{
+			name:           "empty language prompt leaves the system prompt untouched",
+			changes:        []gitdiff.Change{{Status: "M", Path: "a.go", Patch: "-x\n+y\n"}},
+			languagePrompt: "",
+			systemSuffix:   "silence is not.\n",
+			userContains:   []string{"a.go"},
 		},
 		{
 			name: "single change",
@@ -91,7 +107,7 @@ func TestBuildInitial(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := BuildInitial(tt.changes)
+			msgs := BuildInitial(tt.changes, tt.languagePrompt)
 
 			if len(msgs) != 2 {
 				t.Fatalf("len(msgs) = %d, want 2", len(msgs))
@@ -101,6 +117,9 @@ func TestBuildInitial(t *testing.T) {
 			}
 			if msgs[0].Content == "" {
 				t.Error("msgs[0].Content is empty, want non-empty system prompt")
+			}
+			if tt.systemSuffix != "" && !strings.HasSuffix(msgs[0].Content, tt.systemSuffix) {
+				t.Errorf("msgs[0].Content does not end with %q; got tail %q", tt.systemSuffix, tail(msgs[0].Content))
 			}
 			if msgs[1].Role != schema.RoleUser {
 				t.Errorf("msgs[1].Role = %q, want %q", msgs[1].Role, schema.RoleUser)
@@ -115,6 +134,58 @@ func TestBuildInitial(t *testing.T) {
 				if strings.Contains(msgs[1].Content, unwanted) {
 					t.Errorf("user message contains excluded text %q:\n%s", unwanted, msgs[1].Content)
 				}
+			}
+		})
+	}
+}
+
+// tail 截取字符串末尾一小段，用于让断言失败时的输出可读——system prompt 很长，
+// 整段打出来会淹没失败信息。
+func tail(s string) string {
+	const n = 80
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
+}
+
+func TestWithLanguage(t *testing.T) {
+	tests := []struct {
+		name           string
+		systemPrompt   string
+		languagePrompt string
+		want           string
+	}{
+		{
+			name:           "appended after a blank line",
+			systemPrompt:   "base",
+			languagePrompt: "- in Chinese",
+			want:           "base\n\n- in Chinese",
+		},
+		{
+			name:           "trailing newlines on the base prompt are collapsed",
+			systemPrompt:   "base\n\n\n",
+			languagePrompt: "- in Chinese",
+			want:           "base\n\n- in Chinese",
+		},
+		{
+			name:           "empty language prompt returns the base unchanged",
+			systemPrompt:   "base\n",
+			languagePrompt: "",
+			want:           "base\n",
+		},
+		{
+			name:           "whitespace-only language prompt counts as empty",
+			systemPrompt:   "base\n",
+			languagePrompt: "   \n\t ",
+			want:           "base\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := WithLanguage(tt.systemPrompt, tt.languagePrompt); got != tt.want {
+				t.Fatalf("WithLanguage() = %q, want %q", got, tt.want)
 			}
 		})
 	}

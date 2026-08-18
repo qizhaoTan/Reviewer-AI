@@ -159,6 +159,7 @@ func runReview(args []string) {
 		CritiqueTools:       append(append([]tool.ITool{}, readOnlyTools...), tool.CritiqueVerdictTool{}),
 		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
 		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
+		LanguagePrompt:      cfgFile.LanguagePromptOrDefault(),
 	}
 
 	run, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())

@@ -93,6 +93,11 @@ type File struct {
 	Models   map[string]ModelConfig `json:"models"`
 	Roles    Roles                  `json:"roles"`
 	Critique Critique               `json:"critique"`
+
+	// LanguagePrompt 是追加到每段 system prompt 末尾的语言约束，整段照抄进
+	// 提示词。用指针是为了区分"配置里没写"（走默认的中文）和"显式配成空串"
+	// （不加任何语言约束）。取值请走 LanguagePromptOrDefault。
+	LanguagePrompt *string `json:"language_prompt"`
 }
 
 // DefaultPath 返回默认配置文件路径：$REVIEWER_AI_CONFIG（如设置）或 ~/.reviewer/config.json。
@@ -135,4 +140,22 @@ func (f *File) resolveAlias(alias string) (ModelConfig, error) {
 		return ModelConfig{}, fmt.Errorf("resolve model alias: %q not found in models", alias)
 	}
 	return cfg, nil
+}
+
+// defaultLanguagePrompt 是未配置 language_prompt 时追加到 system prompt 末尾的
+// 语言约束。默认要求中文，是因为这个工具当前的使用者就是中文使用者；把整段
+// 提示词而不是"语言名"放进配置，是为了让措辞（含括号里的母语强调）完全可控——
+// 不同语言想强调的方式不一样，模板拼不出来。
+const defaultLanguagePrompt = "- Your response needs to be in Chinese!!!（你的回复必须使用中文）"
+
+// LanguagePromptOrDefault 返回生效的语言提示词。
+//
+// 未配置时兜底为 defaultLanguagePrompt；显式配成空字符串则表示"不加任何语言
+// 约束"，让模型自己决定语言——这是个有意义的选择，所以用指针区分"没写"和
+// "写了空串"。
+func (f *File) LanguagePromptOrDefault() string {
+	if f.LanguagePrompt == nil {
+		return defaultLanguagePrompt
+	}
+	return *f.LanguagePrompt
 }

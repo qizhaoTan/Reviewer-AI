@@ -38,6 +38,12 @@ type Deps struct {
 	// 由调用方从配置读出后传入。
 	CritiqueConcurrency int
 	CritiqueMaxTurns    int
+
+	// LanguagePrompt 是追加到 system prompt 末尾的语言约束，初审和复核两个
+	// 阶段共用同一份——否则会出现审查意见是中文、复核理由是英文的割裂结果。
+	// 由调用方从配置读出（config.File.LanguagePromptOrDefault）后传入；
+	// 留空表示不加语言约束。
+	LanguagePrompt string
 }
 
 // Run 执行一次完整的审查：查找或新建一条 Run 记录，驱动 tool loop 直到模型
@@ -57,7 +63,7 @@ type Deps struct {
 func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
 	runKey := buildRunKey(repoAbs, branch)
 
-	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes)
+	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes, deps.LanguagePrompt)
 	if err != nil {
 		return nil, fmt.Errorf("resume or start run: %w", err)
 	}
@@ -174,7 +180,7 @@ func buildRunKey(repoAbs, branch string) string {
 //
 // 用内容 hash 而不是"最新一条记录"做比较，是为了覆盖 git stash / stash pop
 // 这类场景——旧记录不会因为不是最新就被忽略，只要内容相同就能找到。
-func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, changes []gitdiff.Change) (*store.Run, error) {
+func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, changes []gitdiff.Change, languagePrompt string) (*store.Run, error) {
 	hash := gitdiff.SnapshotHash(changes)
 	matched, err := db.LoadRunByHash(ctx, runKey, hash)
 	if err != nil {
@@ -196,7 +202,7 @@ func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, chang
 		RepoPath: runKey,
 		Status:   store.StatusInProgress,
 		Snapshot: changes,
-		Messages: prompt.BuildInitial(changes),
+		Messages: prompt.BuildInitial(changes, languagePrompt),
 	}
 	if err := db.SaveRun(ctx, *run); err != nil {
 		return nil, fmt.Errorf("save initial run: %w", err)
