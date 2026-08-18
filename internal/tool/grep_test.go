@@ -230,3 +230,92 @@ func TestParseRipgrepContentLine(t *testing.T) {
 		})
 	}
 }
+
+func TestGrepWithRipgrepNoIgnore(t *testing.T) {
+	tests := []struct {
+		name        string
+		noIgnore    bool
+		wantPaths   []string
+		wantExclude []string
+	}{
+		{
+			name:        "default respects gitignore",
+			noIgnore:    false,
+			wantPaths:   []string{"kept.go"},
+			wantExclude: []string{"build/gen.go", ".hidden/secret.go"},
+		},
+		{
+			name:        "no_ignore searches gitignored files but not hidden ones",
+			noIgnore:    true,
+			wantPaths:   []string{"kept.go", "build/gen.go"},
+			wantExclude: []string{".hidden/secret.go"},
+		},
+	}
+
+	if !ripgrepAvailable() {
+		t.Skip("rg not on PATH; no_ignore only takes effect on the ripgrep path")
+	}
+	root := setupGitignoreFixture(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches, err := grepWithRipgrep(root, "func Marker", "", outputModeFilesWithMatches, tt.noIgnore)
+			if err != nil {
+				t.Fatalf("grepWithRipgrep() error = %v", err)
+			}
+			gotSet := make(map[string]bool, len(matches))
+			for _, m := range matches {
+				gotSet[m.Path] = true
+			}
+			for _, want := range tt.wantPaths {
+				if !gotSet[want] {
+					t.Errorf("expected path %q in matches, got %v", want, matches)
+				}
+			}
+			for _, unwanted := range tt.wantExclude {
+				if gotSet[unwanted] {
+					t.Errorf("path %q should have been excluded, got %v", unwanted, matches)
+				}
+			}
+		})
+	}
+}
+
+func TestGrepWithStdlibSkipsHidden(t *testing.T) {
+	tests := []struct {
+		name        string
+		pattern     string
+		wantPaths   []string
+		wantExclude []string
+	}{
+		{
+			name:        "hidden dirs are never searched",
+			pattern:     "func Marker",
+			wantPaths:   []string{"kept.go", "build/gen.go"},
+			wantExclude: []string{".hidden/secret.go"},
+		},
+	}
+
+	root := setupGitignoreFixture(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches, err := grepWithStdlib(root, tt.pattern, "", outputModeFilesWithMatches)
+			if err != nil {
+				t.Fatalf("grepWithStdlib() error = %v", err)
+			}
+			gotSet := make(map[string]bool, len(matches))
+			for _, m := range matches {
+				gotSet[m.Path] = true
+			}
+			for _, want := range tt.wantPaths {
+				if !gotSet[want] {
+					t.Errorf("expected path %q in matches, got %v", want, matches)
+				}
+			}
+			for _, unwanted := range tt.wantExclude {
+				if gotSet[unwanted] {
+					t.Errorf("path %q should have been excluded, got %v", unwanted, matches)
+				}
+			}
+		})
+	}
+}

@@ -34,6 +34,7 @@ type GrepInput struct {
 	Pattern    string `json:"pattern"`               // 正则表达式（RE2 语法）
 	Glob       string `json:"glob,omitempty"`        // 文件名过滤，如 "*.go"；为空表示不过滤
 	OutputMode string `json:"output_mode,omitempty"` // "files_with_matches"（默认）或 "content"
+	NoIgnore   bool   `json:"no_ignore,omitempty"`   // true 时不应用 .gitignore 过滤；仅在 ripgrep 路径生效
 }
 
 // GrepTool 是 grep 工具的 ITool 实现，方法体直接委托给同包的
@@ -50,7 +51,7 @@ func (GrepTool) Execute(ctx context.Context, repoRoot string, args json.RawMessa
 func GrepDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        "grep",
-		Description: "Search file contents in the repository using a regular expression. Use this to find where a symbol, string, or pattern appears before deciding which file to read_file. output_mode \"files_with_matches\" (default) returns just the matching file paths; \"content\" returns matching lines with line numbers.",
+		Description: "Search file contents in the repository using a regular expression. Use this to find where a symbol, string, or pattern appears before deciding which file to read_file. output_mode \"files_with_matches\" (default) returns just the matching file paths; \"content\" returns matching lines with line numbers. Files ignored by .gitignore are skipped by default; set no_ignore to true to search them too. Hidden files and directories (names starting with a dot) are never searched.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -66,6 +67,10 @@ func GrepDefinition() schema.ToolDefinition {
 					"type":        "string",
 					"enum":        []interface{}{outputModeFilesWithMatches, outputModeContent},
 					"description": "\"files_with_matches\" (default) returns matching file paths only; \"content\" returns matching lines with line numbers",
+				},
+				"no_ignore": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Set to true to also search files excluded by .gitignore (e.g. build output or generated code). Defaults to false. Hidden files are not searched even when this is true.",
 				},
 			},
 			"required": []interface{}{"pattern"},
@@ -96,7 +101,7 @@ func Grep(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 		err     error
 	)
 	if ripgrepAvailable() {
-		matches, err = grepWithRipgrep(repoRoot, input.Pattern, input.Glob, mode)
+		matches, err = grepWithRipgrep(repoRoot, input.Pattern, input.Glob, mode, input.NoIgnore)
 	} else {
 		matches, err = grepWithStdlib(repoRoot, input.Pattern, input.Glob, mode)
 	}
@@ -145,7 +150,7 @@ func renderGrepMatches(pattern string, matches []grepMatch, mode string) string 
 }
 
 // grepWithRipgrep 用 rg 执行搜索；files_with_matches 用 -l，content 用 -n。
-func grepWithRipgrep(repoRoot, pattern, glob, mode string) ([]grepMatch, error) {
+func grepWithRipgrep(repoRoot, pattern, glob, mode string, noIgnore bool) ([]grepMatch, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), searchTimeoutSeconds*time.Second)
 	defer cancel()
 
@@ -157,6 +162,11 @@ func grepWithRipgrep(repoRoot, pattern, glob, mode string) ([]grepMatch, error) 
 	}
 	if glob != "" {
 		args = append(args, "--glob", glob)
+	}
+	if noIgnore {
+		// 只加 --no-ignore，不加 --hidden：隐藏文件对审查场景价值低、噪声大，
+		// 两条路径都保持"永不搜索隐藏文件"这一条统一语义（标准库回退实现同样跳过）。
+		args = append(args, "--no-ignore")
 	}
 	args = append(args, "--", pattern)
 
@@ -235,9 +245,12 @@ func grepWithStdlib(repoRoot, pattern, glob, mode string) ([]grepMatch, error) {
 			return err
 		}
 		if d.IsDir() {
-			if path != repoRoot && ignoredDirNames[d.Name()] {
+			if path != repoRoot && (ignoredDirNames[d.Name()] || isHiddenName(d.Name())) {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if isHiddenName(d.Name()) {
 			return nil
 		}
 

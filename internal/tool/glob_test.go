@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -178,5 +179,116 @@ func TestGlob_ResultLimitTruncates(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "result limit") {
 		t.Errorf("expected truncation notice in output:\n%s", result.Output)
+	}
+}
+
+// setupGitignoreFixture 建一个带 .gitignore 的仓库，用于验证 no_ignore 参数：
+//
+//	kept.go            (未被忽略)
+//	build/gen.go       (被 .gitignore 忽略)
+//	.hidden/secret.go  (隐藏目录，任何情况下都不应出现)
+//
+// 只有 rg 会读 .gitignore，所以这里必须初始化成真正的 git 仓库。
+func setupGitignoreFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writeFileWithDirs(t, filepath.Join(root, ".gitignore"), "build/\n")
+	writeFileWithDirs(t, filepath.Join(root, "kept.go"), "package kept\n\nfunc Marker() {}\n")
+	writeFileWithDirs(t, filepath.Join(root, "build", "gen.go"), "package build\n\nfunc Marker() {}\n")
+	writeFileWithDirs(t, filepath.Join(root, ".hidden", "secret.go"), "package hidden\n\nfunc Marker() {}\n")
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git init unavailable, skipping .gitignore fixture: %v (%s)", err, out)
+	}
+	return root
+}
+
+func TestGlobWithRipgrepNoIgnore(t *testing.T) {
+	tests := []struct {
+		name        string
+		noIgnore    bool
+		wantPaths   []string
+		wantExclude []string
+	}{
+		{
+			name:        "default respects gitignore",
+			noIgnore:    false,
+			wantPaths:   []string{"kept.go"},
+			wantExclude: []string{"build/gen.go", ".hidden/secret.go"},
+		},
+		{
+			name:        "no_ignore includes gitignored files but not hidden ones",
+			noIgnore:    true,
+			wantPaths:   []string{"kept.go", "build/gen.go"},
+			wantExclude: []string{".hidden/secret.go"},
+		},
+	}
+
+	if !ripgrepAvailable() {
+		t.Skip("rg not on PATH; no_ignore only takes effect on the ripgrep path")
+	}
+	root := setupGitignoreFixture(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := globWithRipgrep(root, "**/*.go", tt.noIgnore)
+			if err != nil {
+				t.Fatalf("globWithRipgrep() error = %v", err)
+			}
+			gotSet := make(map[string]bool, len(got))
+			for _, p := range got {
+				gotSet[p] = true
+			}
+			for _, want := range tt.wantPaths {
+				if !gotSet[want] {
+					t.Errorf("expected path %q in result, got %v", want, got)
+				}
+			}
+			for _, unwanted := range tt.wantExclude {
+				if gotSet[unwanted] {
+					t.Errorf("path %q should have been excluded, got %v", unwanted, got)
+				}
+			}
+		})
+	}
+}
+
+func TestGlobWithStdlibSkipsHidden(t *testing.T) {
+	tests := []struct {
+		name        string
+		pattern     string
+		wantPaths   []string
+		wantExclude []string
+	}{
+		{
+			name:        "hidden dirs and files are never listed",
+			pattern:     "**/*.go",
+			wantPaths:   []string{"kept.go", "build/gen.go"},
+			wantExclude: []string{".hidden/secret.go"},
+		},
+	}
+
+	root := setupGitignoreFixture(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := globWithStdlib(root, tt.pattern)
+			if err != nil {
+				t.Fatalf("globWithStdlib() error = %v", err)
+			}
+			gotSet := make(map[string]bool, len(got))
+			for _, p := range got {
+				gotSet[p] = true
+			}
+			for _, want := range tt.wantPaths {
+				if !gotSet[want] {
+					t.Errorf("expected path %q in result, got %v", want, got)
+				}
+			}
+			for _, unwanted := range tt.wantExclude {
+				if gotSet[unwanted] {
+					t.Errorf("path %q should have been excluded, got %v", unwanted, got)
+				}
+			}
+		})
 	}
 }

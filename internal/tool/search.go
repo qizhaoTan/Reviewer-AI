@@ -27,6 +27,13 @@ var ignoredDirNames = map[string]bool{
 	"vendor":       true,
 }
 
+// isHiddenName 判断一个文件/目录名是否是隐藏项（以 "." 开头）。
+// glob/grep 两条路径统一"不搜隐藏文件"这一语义：rg 路径靠 rg 的默认行为（即使加了
+// --no-ignore 也不会加 --hidden），标准库回退路径靠本函数在遍历时跳过。
+func isHiddenName(name string) bool {
+	return len(name) > 1 && name[0] == '.'
+}
+
 // ripgrepAvailable 判断当前 PATH 上是否有可用的 ripgrep(rg) 二进制。
 // glob/grep 两个工具都优先走 rg（更快、原生支持 .gitignore），
 // 没有 rg 时各自回退到标准库实现的功能子集。
