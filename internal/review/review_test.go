@@ -314,3 +314,122 @@ func TestKeptFindingsReturnsACopy(t *testing.T) {
 		})
 	}
 }
+
+func TestFindingStatusIsWithdrawn(t *testing.T) {
+	tests := []struct {
+		name   string
+		status FindingStatus
+		want   bool
+	}{
+		// 空串是阶段四之前落盘的记录读出来的值，必须等同于 open，
+		// 否则加一个字段就会让所有历史意见集体消失。
+		{name: "zero value is not withdrawn", status: "", want: false},
+		{name: "open is not withdrawn", status: StatusOpen, want: false},
+		{name: "withdrawn is withdrawn", status: StatusWithdrawn, want: true},
+		{name: "unknown value is not withdrawn", status: FindingStatus("bogus"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.status.IsWithdrawn(); got != tt.want {
+				t.Errorf("FindingStatus(%q).IsWithdrawn() = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReportActiveFindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		report  Report
+		wantIDs []string
+	}{
+		{
+			name: "withdrawn findings are excluded even though critique kept them",
+			report: Report{
+				Critiqued: true,
+				Findings: []Finding{
+					{ID: "f1", Kept: true},
+					{ID: "f2", Kept: true, Status: StatusWithdrawn},
+					{ID: "f3", Kept: true, Status: StatusOpen},
+				},
+			},
+			wantIDs: []string{"f1", "f3"},
+		},
+		{
+			// Kept 和 Status 是两道独立的闸门，任一关闭都拦下这条意见。
+			name: "a finding must clear both critique and interaction",
+			report: Report{
+				Critiqued: true,
+				Findings: []Finding{
+					{ID: "f1", Kept: false},                          // 复核砍掉
+					{ID: "f2", Kept: true, Status: StatusWithdrawn},  // 用户说服撤回
+					{ID: "f3", Kept: false, Status: StatusWithdrawn}, // 两道都没过
+					{ID: "f4", Kept: true},                           // 两道都过
+				},
+			},
+			wantIDs: []string{"f4"},
+		},
+		{
+			// 复核没跑时 Kept 全是零值，KeptFindings 会全部放行；
+			// Status 这道闸门此时仍应生效。
+			name: "before critique withdrawal still applies",
+			report: Report{
+				Critiqued: false,
+				Findings: []Finding{
+					{ID: "f1"},
+					{ID: "f2", Status: StatusWithdrawn},
+				},
+			},
+			wantIDs: []string{"f1"},
+		},
+		{
+			name:    "empty report returns empty",
+			report:  Report{Critiqued: true},
+			wantIDs: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.report.ActiveFindings()
+			if len(got) != len(tt.wantIDs) {
+				t.Fatalf("len(ActiveFindings()) = %d, want %d (got %+v)", len(got), len(tt.wantIDs), got)
+			}
+			for i, wantID := range tt.wantIDs {
+				if got[i].ID != wantID {
+					t.Errorf("ActiveFindings()[%d].ID = %q, want %q", i, got[i].ID, wantID)
+				}
+			}
+		})
+	}
+}
+
+// TestActiveFindingsReturnsACopy 与 TestKeptFindingsReturnsACopy 同理：
+// Render 会就地排序返回值，共享底层数组会打乱调用方持有的 Report。
+func TestActiveFindingsReturnsACopy(t *testing.T) {
+	tests := []struct {
+		name   string
+		report Report
+	}{
+		{
+			name: "after critique",
+			report: Report{Critiqued: true, Findings: []Finding{
+				{ID: "f1", Kept: true}, {ID: "f2", Kept: true},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.report.ActiveFindings()
+			if len(got) < 2 {
+				t.Fatalf("len(ActiveFindings()) = %d, want at least 2 for this test", len(got))
+			}
+			got[0].ID = "mutated"
+			if tt.report.Findings[0].ID == "mutated" {
+				t.Error("writing to ActiveFindings() result modified the Report; want an independent copy")
+			}
+		})
+	}
+}

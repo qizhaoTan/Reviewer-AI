@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -171,7 +172,7 @@ func TestSaveAndLoadRunFindings(t *testing.T) {
 			// 每个字段都要原样读回——尤其是 Kept 和 CritiqueReason，被丢弃的意见
 			// 之所以落盘就是为了保住这两个字段。
 			for i := range got.Findings {
-				if got.Findings[i] != tt.run.Findings[i] {
+				if !reflect.DeepEqual(got.Findings[i], tt.run.Findings[i]) {
 					t.Errorf("Findings[%d] = %+v, want %+v", i, got.Findings[i], tt.run.Findings[i])
 				}
 			}
@@ -213,7 +214,7 @@ func TestRunReportRoundTrip(t *testing.T) {
 				t.Fatalf("len(Findings) = %d, want %d", len(got.Findings), len(tt.report.Findings))
 			}
 			for i := range got.Findings {
-				if got.Findings[i] != tt.report.Findings[i] {
+				if !reflect.DeepEqual(got.Findings[i], tt.report.Findings[i]) {
 					t.Errorf("Findings[%d] = %+v, want %+v", i, got.Findings[i], tt.report.Findings[i])
 				}
 			}

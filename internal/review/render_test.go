@@ -1,6 +1,7 @@
 package review
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,22 @@ func TestRender(t *testing.T) {
 			},
 			wantContains: []string{"genuine problem", "1 finding:"},
 			wantExcludes: []string{"over-interpreted", "not supported by the code"},
+		},
+		{
+			// 用户提出异议、模型同意撤回的意见不该再出现在终端里，理由与
+			// 复核丢弃的那些一样：它已经有了结论，再打扰用户就是噪音。
+			name: "withdrawn findings are excluded even though critique kept them",
+			in: Report{
+				Critiqued: true,
+				Summary:   "s",
+				Findings: []Finding{
+					{ID: "f1", File: "a.go", Severity: SeverityError, Summary: "still standing", Kept: true},
+					{ID: "f2", File: "b.go", Severity: SeverityError, Summary: "author pushed back", Kept: true,
+						Status: StatusWithdrawn},
+				},
+			},
+			wantContains: []string{"still standing", "1 finding:"},
+			wantExcludes: []string{"author pushed back"},
 		},
 		{
 			name: "before critique findings are shown even though Kept is false",
@@ -162,7 +179,7 @@ func TestRenderDoesNotMutateInput(t *testing.T) {
 			Render(tt.in)
 
 			for i := range before {
-				if tt.in.Findings[i] != before[i] {
+				if !reflect.DeepEqual(tt.in.Findings[i], before[i]) {
 					t.Errorf("Findings[%d] changed: got %+v, want %+v", i, tt.in.Findings[i], before[i])
 				}
 			}

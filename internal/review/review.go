@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
 // Severity 是一条审查意见的严重程度。取值刻意只有三档：档位再多，模型的
@@ -92,7 +94,41 @@ type Finding struct {
 
 	// CritiqueReason 是复核给出的保留/丢弃理由，复核未执行时为空。
 	CritiqueReason string `json:"critique_reason,omitempty"`
+
+	// Status 是这条意见在用户交互中的状态。零值（空串）等同于 StatusOpen——
+	// 阶段四之前落盘的记录读出来就是空串，不该因为多了一个字段就全变成
+	// "状态未知"。取值判断一律走 Status.IsWithdrawn / Report.ActiveFindings，
+	// 不要直接跟 StatusOpen 做等值比较。
+	Status FindingStatus `json:"status,omitempty"`
+
+	// Discussion 是围绕这条意见的追加对话：用户的 reply 与模型的回应，
+	// 按时间顺序追加。用 schema.Message 而不是自定义的 {角色,内容} 二元组，
+	// 是因为模型在 reply 循环里同样可以调用只读工具去查证——自定义类型会把
+	// ToolCalls 丢掉，那段"模型为了回答你的质疑去读了哪些代码"的记录就没了，
+	// 而这恰恰是判断它的回应可不可信的依据。
+	Discussion []schema.Message `json:"discussion,omitempty"`
 }
+
+// FindingStatus 记录一条意见在用户交互中的状态。
+//
+// 它与 Kept 是两套彼此独立的判据，刻意不合并：Kept 归复核管（模型自我批判的
+// 结论），Status 归交互管（用户介入后的结论）。合成一个字段的话，用户撤回一条
+// 意见和复核砍掉一条意见就再也分不开了，而这两件事对调优提示词的意义完全不同。
+type FindingStatus string
+
+const (
+	// StatusOpen 是意见的初始状态：已提出、尚未被撤回。
+	StatusOpen FindingStatus = "open"
+	// StatusWithdrawn 表示用户提出异议后，模型认同其理由并撤回了这条意见。
+	StatusWithdrawn FindingStatus = "withdrawn"
+)
+
+// IsWithdrawn 报告这条意见是否已被撤回。
+//
+// 用方法而不是 `s == StatusWithdrawn` 的直接比较，是为了把"空串等同于 open"
+// 这条兼容约定收在一处：阶段四之前的记录、以及任何没显式设过 Status 的
+// Finding，读出来都是空串。
+func (s FindingStatus) IsWithdrawn() bool { return s == StatusWithdrawn }
 
 // Report 是一次审查的完整结构化结果。
 type Report struct {
@@ -124,6 +160,29 @@ func (r Report) KeptFindings() []Finding {
 		}
 	}
 	return kept
+}
+
+// ActiveFindings 返回最终应当呈现给用户的意见：既通过了复核，又没有被用户
+// 的异议说服撤回。这是展示层唯一该用的入口（终端渲染、Web 的"保留"区块）。
+//
+// 单开一个方法而不是让各处调用方自己拼 `Kept && !Status.IsWithdrawn()`：
+// 判据一旦散落在多处，日后再加一种状态就必然漏改其中一处，而漏改的表现是
+// "某条意见在终端不见了但网页上还在"这类极难察觉的不一致。
+//
+// 与 KeptFindings 的关系：KeptFindings 只回答"复核放行了哪些"，是复核阶段的
+// 中间结论，Web 详情页靠它把意见分成保留/丢弃两组；ActiveFindings 是叠加了
+// 用户交互之后的最终结论。
+//
+// 返回的一律是新切片，调用方可以安全地就地排序。
+func (r Report) ActiveFindings() []Finding {
+	kept := r.KeptFindings()
+	active := make([]Finding, 0, len(kept))
+	for _, f := range kept {
+		if !f.Status.IsWithdrawn() {
+			active = append(active, f)
+		}
+	}
+	return active
 }
 
 // NormalizeReport 校验并规范化模型提交的 Report：逐条检查必填字段、

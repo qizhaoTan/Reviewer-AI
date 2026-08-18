@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -227,7 +228,7 @@ func TestCritiqueDoesNotMutateInput(t *testing.T) {
 				t.Error("input Report.Critiqued was flipped to true")
 			}
 			for i := range before {
-				if in.Findings[i] != before[i] {
+				if !reflect.DeepEqual(in.Findings[i], before[i]) {
 					t.Errorf("input Findings[%d] changed: got %+v, want %+v", i, in.Findings[i], before[i])
 				}
 			}

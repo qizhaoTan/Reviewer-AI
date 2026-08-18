@@ -8,16 +8,16 @@ import (
 
 // Render 把审查结果渲染成给人看的终端文本。
 //
-// 只渲染通过复核的意见（见 Report.KeptFindings）——被复核判定为过度解读的
-// 意见仍然留在数据库里备查，但不该打扰用户。
+// 只渲染最终有效的意见（见 Report.ActiveFindings）——被复核判定为过度解读的、
+// 以及用户提出异议后模型同意撤回的，都仍然留在数据库里备查，但不该打扰用户。
 //
 // 排序规则：先按严重程度从重到轻，同级再按文件路径、行号排——用户最该先看到的
 // 是 error，而同一个文件里的多条意见挨在一起读起来才连贯。
 func Render(r Report) string {
 	var b strings.Builder
 
-	// KeptFindings 保证返回新切片，所以下面就地排序不会打乱调用方持有的 Report。
-	findings := r.KeptFindings()
+	// ActiveFindings 保证返回新切片，所以下面就地排序不会打乱调用方持有的 Report。
+	findings := r.ActiveFindings()
 	sortFindings(findings)
 
 	if len(findings) == 0 {
