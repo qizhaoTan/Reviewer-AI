@@ -774,3 +774,148 @@ func TestParentRunIDRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteRun 覆盖删除的三种情形：删掉一条独立记录、删掉一条被重审链引用的
+// 记录（子记录的 parent_run_id 要被清空）、删一条不存在的记录（不报错、返回
+// false）。链的情形是重点：漏掉子指针清理的话，子记录详情页上会留下一个点进去
+// 404 的"上一轮"链接。
+func TestDeleteRun(t *testing.T) {
+	// seed 是每个用例的初始数据；deleteID 是要删的那一条。
+	tests := []struct {
+		name        string
+		seed        []Run
+		deleteID    string
+		wantDeleted bool
+		wantRemain  []string          // 删除后仍应存在的 ID
+		wantParents map[string]string // 删除后各记录的 ParentRunID
+	}{
+		{
+			name:        "deletes a standalone run",
+			seed:        []Run{{ID: "r1", RepoPath: "/repo#main", Status: StatusCompleted}},
+			deleteID:    "r1",
+			wantDeleted: true,
+			wantRemain:  nil,
+			wantParents: map[string]string{},
+		},
+		{
+			name: "clears parent_run_id on children of the deleted run",
+			seed: []Run{
+				{ID: "r1", RepoPath: "/repo#main", Status: StatusCompleted},
+				{ID: "r2", RepoPath: "/repo#main", Status: StatusCompleted, ParentRunID: "r1"},
+				{ID: "r3", RepoPath: "/repo#main", Status: StatusCompleted, ParentRunID: "r2"},
+			},
+			deleteID:    "r1",
+			wantDeleted: true,
+			wantRemain:  []string{"r2", "r3"},
+			// r2 的父被删了所以置空；r3 的父是 r2、还在，不该被动到。
+			wantParents: map[string]string{"r2": "", "r3": "r2"},
+		},
+		{
+			name:        "reports a missing run without failing",
+			seed:        []Run{{ID: "r1", RepoPath: "/repo#main", Status: StatusCompleted}},
+			deleteID:    "nope",
+			wantDeleted: false,
+			wantRemain:  []string{"r1"},
+			wantParents: map[string]string{"r1": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			for _, run := range tt.seed {
+				if err := s.SaveRun(ctx, run); err != nil {
+					t.Fatalf("SaveRun %s: %v", run.ID, err)
+				}
+			}
+
+			deleted, err := s.DeleteRun(ctx, tt.deleteID)
+			if err != nil {
+				t.Fatalf("DeleteRun: %v", err)
+			}
+			if deleted != tt.wantDeleted {
+				t.Errorf("DeleteRun deleted = %v, want %v", deleted, tt.wantDeleted)
+			}
+
+			gone, err := s.LoadRun(ctx, tt.deleteID)
+			if err != nil {
+				t.Fatalf("LoadRun %s: %v", tt.deleteID, err)
+			}
+			if tt.wantDeleted && gone != nil {
+				t.Errorf("run %s still present after delete", tt.deleteID)
+			}
+
+			remaining, err := s.ListAllRuns(ctx, 0)
+			if err != nil {
+				t.Fatalf("ListAllRuns: %v", err)
+			}
+			if len(remaining) != len(tt.wantRemain) {
+				t.Errorf("remaining runs = %d, want %d", len(remaining), len(tt.wantRemain))
+			}
+			for _, id := range tt.wantRemain {
+				run, err := s.LoadRun(ctx, id)
+				if err != nil {
+					t.Fatalf("LoadRun %s: %v", id, err)
+				}
+				if run == nil {
+					t.Fatalf("run %s missing after deleting %s", id, tt.deleteID)
+				}
+			}
+			for id, wantParent := range tt.wantParents {
+				run, err := s.LoadRun(ctx, id)
+				if err != nil {
+					t.Fatalf("LoadRun %s: %v", id, err)
+				}
+				if run == nil {
+					t.Fatalf("run %s missing", id)
+				}
+				if run.ParentRunID != wantParent {
+					t.Errorf("run %s ParentRunID = %q, want %q", id, run.ParentRunID, wantParent)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteRunLeavesOtherRunsIntact 确认删除只动目标记录和它的子指针，
+// 不会顺带把无关记录的其它列改掉——用 UPDATE ... WHERE parent_run_id = ?
+// 时漏写条件正是这类 bug 的典型来源。
+func TestDeleteRunLeavesOtherRunsIntact(t *testing.T) {
+	tests := []struct{ name string }{{name: "unrelated run keeps its fields"}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			keep := Run{
+				ID: "keep", RepoPath: "/repo#main", Status: StatusCompleted,
+				Summary:   "整体还行",
+				Critiqued: true,
+				Findings:  []review.Finding{{ID: "f1", File: "a.go", Summary: "s", Kept: true}},
+				Snapshot:  []gitdiff.Change{{Path: "a.go", Patch: "@@"}},
+			}
+			if err := s.SaveRun(ctx, keep); err != nil {
+				t.Fatalf("SaveRun keep: %v", err)
+			}
+			if err := s.SaveRun(ctx, Run{ID: "drop", RepoPath: "/other#main", Status: StatusFailed}); err != nil {
+				t.Fatalf("SaveRun drop: %v", err)
+			}
+
+			if _, err := s.DeleteRun(ctx, "drop"); err != nil {
+				t.Fatalf("DeleteRun: %v", err)
+			}
+
+			got, err := s.LoadRun(ctx, "keep")
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got == nil {
+				t.Fatal("keep run was deleted")
+			}
+			if got.Summary != keep.Summary || !got.Critiqued || len(got.Findings) != 1 || len(got.Snapshot) != 1 {
+				t.Errorf("unrelated run mutated: %+v", got)
+			}
+		})
+	}
+}

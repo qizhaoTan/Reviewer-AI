@@ -478,3 +478,55 @@ func replaceToolResultContents(messages []schema.Message) []schema.Message {
 	}
 	return out
 }
+
+// DeleteRun 删除一条运行记录，并把所有以它为父的记录的 parent_run_id 置空。
+// 记录不存在时返回 (false, nil)——重复点删除按钮不该报错。
+//
+// 为什么要顺带清理子记录：ParentRunID 是一条重审链上的反向指针，父记录一删，
+// 子记录详情页上的"上一轮"链接就指向了一个不存在的 ID，点进去 404。置空
+// 在语义上也是对的——那一轮确实不存在了。
+//
+// 不做级联删除：一条链上的后续重审是独立的审查结果，用户删掉某一轮通常是
+// 想重审那一轮，而不是想把之后的成果一起丢掉。
+//
+// 两条语句放在一个事务里：只删了记录却没清子指针的话，那些死链就永远留在库里，
+// 而且没有任何后续操作会去修它。
+func (s *Store) DeleteRun(ctx context.Context, id string) (deleted bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("delete run %s: begin transaction: %w", id, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE id = ?`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete run %s: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete run %s: %w", id, err)
+	}
+	// 记录本来就不存在时直接提交空事务返回：此时不该去改任何子记录，
+	// 因为"父记录不存在"这件事在删除之前就已经成立了。
+	if affected == 0 {
+		if err = tx.Commit(); err != nil {
+			return false, fmt.Errorf("delete run %s: commit: %w", id, err)
+		}
+		return false, nil
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE runs SET parent_run_id = '', updated_at = ? WHERE parent_run_id = ?
+	`, time.Now().UnixNano(), id); err != nil {
+		return false, fmt.Errorf("delete run %s: clear child parent_run_id: %w", id, err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, fmt.Errorf("delete run %s: commit: %w", id, err)
+	}
+	return true, nil
+}

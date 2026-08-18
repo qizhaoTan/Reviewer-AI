@@ -103,6 +103,9 @@ const sharedCSS = `
   .sev-error   { background: #fce8e6; color: #c5221f; }
   .sev-warning { background: #fef7e0; color: #b06000; }
   .sev-info    { background: #e8f0fe; color: #1a56c4; }
+  .banner { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+  .banner.ok  { background: #e6f4ea; color: #137333; }
+  .banner.err { background: #fce8e6; color: #c5221f; }
 `
 
 const indexHTML = `<!DOCTYPE html>
@@ -122,6 +125,11 @@ const indexHTML = `<!DOCTYPE html>
   td.kept { font-weight: 600; }
   td.dropped { color: #8a9099; }
   .placeholder { color: #b0b5bb; }
+  td.ops { white-space: nowrap; }
+  .del { display: inline; margin-left: 12px; }
+  .del button { background: none; border: none; padding: 0; font: inherit; font-size: 14px;
+                color: #c5221f; cursor: pointer; }
+  .del button:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -130,7 +138,9 @@ const indexHTML = `<!DOCTYPE html>
   <div class="sub">本机历史审查运行，按更新时间倒序。点击查看完整消息历史与复核前后的意见差异。</div>
 </header>
 <main>
-{{if .}}
+{{if .Notice}}<div class="banner ok">{{.Notice}}</div>{{end}}
+{{if .Error}}<div class="banner err">{{.Error}}</div>{{end}}
+{{if .Rows}}
   <table>
     <thead><tr>
       <th style="width:150px">时间</th>
@@ -140,10 +150,10 @@ const indexHTML = `<!DOCTYPE html>
       <th style="width:70px">文件</th>
       <th style="width:70px">保留</th>
       <th style="width:70px">丢弃</th>
-      <th style="width:90px">操作</th>
+      <th style="width:160px">操作</th>
     </tr></thead>
     <tbody>
-    {{range .}}
+    {{range .Rows}}
       <tr>
         <td class="time mono">{{.UpdatedAt.Format "2006-01-02 15:04:05"}}</td>
         <td><span class="badge {{statusClass .Status}}">{{.Status}}</span></td>
@@ -152,7 +162,17 @@ const indexHTML = `<!DOCTYPE html>
         <td class="num">{{.Files}}</td>
         <td class="kept">{{.Kept}}</td>
         <td class="dropped">{{if .Critiqued}}{{.Dropped}}{{else}}<span class="placeholder">未复核</span>{{end}}</td>
-        <td><a href="/run?id={{.ID}}">查看详情 →</a></td>
+        <td class="ops">
+          <a href="/run?id={{.ID}}">查看详情 →</a>
+          {{/* 删除不可撤销（整条消息历史一起没了），所以拦一道 confirm。
+               用内联 onsubmit 而不是引一个 JS 文件：一行就够，不值得为它
+               破坏"零前端依赖"这个约定。 */}}
+          <form class="del" method="post" action="/delete"
+                onsubmit="return confirm('删除这条审查记录？消息历史与全部意见都会一并删除，无法恢复。')">
+            <input type="hidden" name="run" value="{{.ID}}">
+            <button type="submit" title="删除后可对同一改动重新审查">删除</button>
+          </form>
+        </td>
       </tr>
     {{end}}
     </tbody>
@@ -260,10 +280,6 @@ const runHTML = `{{define "findings"}}
   .finding.withdrawn { opacity: .6; }
   .finding.withdrawn .fsummary { text-decoration: line-through; }
   .badge.wd { background: #eef0f2; color: #646a73; }
-
-  .banner { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
-  .banner.ok  { background: #e6f4ea; color: #137333; }
-  .banner.err { background: #fce8e6; color: #c5221f; }
 
   .rereview { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px;
               box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

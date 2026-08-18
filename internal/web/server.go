@@ -1,4 +1,4 @@
-// Package web 提供一个只读的历史审查记录查看服务。
+// Package web 提供历史审查记录的查看与管理服务。
 //
 // 定位：个人调试用，本机监听、无鉴权——用来回答"这次审查模型到底看了什么、
 // 复核砍掉了哪些意见、为什么砍"，而不是给团队用的正式看板。
@@ -20,16 +20,22 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/store"
 )
 
-// RunSource 提供历史运行记录的只读访问，由 *store.Store 实现。
+// RunSource 提供 Web 层需要的记录访问能力，由 *store.Store 实现。
 //
-// 只声明这两个方法而不是直接收 *store.Store：列表页要的是"全部记录"，
-// 详情页要的是"按 ID 取一条"，Store 上其余的写入方法和恢复用查询都不该
-// 暴露给一个只读的展现层。
+// 只声明这三个方法而不是直接收 *store.Store：列表页要的是"全部记录"，
+// 详情页要的是"按 ID 取一条"，加上一个删除。Store 上其余的写入方法和
+// 恢复用查询与展现层无关，不该暴露给它。
 type RunSource interface {
 	// ListAllRuns 跨仓库、跨分支列出历史运行，按更新时间倒序，最多 limit 条。
 	ListAllRuns(ctx context.Context, limit int) ([]store.Run, error)
 	// LoadRun 按 ID 加载一条记录；不存在时返回 (nil, nil)。
 	LoadRun(ctx context.Context, id string) (*store.Run, error)
+	// DeleteRun 删除一条记录，返回该记录此前是否存在。
+	//
+	// 删除放在 RunSource 而不是 Reviewer 里：它不需要调模型，纯粹是对本地
+	// 数据的操作。放进 Reviewer 会让"模型没配好"连删记录都做不了，而清理
+	// 一条跑坏的记录恰恰是这种时候最想做的事。
+	DeleteRun(ctx context.Context, id string) (bool, error)
 }
 
 // Reviewer 是需要调用大模型的那部分交互能力，由 cmd 入口注入 engine 的实现。
@@ -75,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/run", s.handleRun)
 	mux.HandleFunc("/reply", s.handleReply)
 	mux.HandleFunc("/rereview", s.handleRereview)
+	mux.HandleFunc("/delete", s.handleDelete)
 	return mux
 }
 
@@ -127,9 +134,24 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := indexTmpl.Execute(w, rows); err != nil {
+	page := indexPage{
+		Rows:   rows,
+		Notice: r.URL.Query().Get("notice"),
+		Error:  r.URL.Query().Get("error"),
+	}
+	if err := indexTmpl.Execute(w, page); err != nil {
 		http.Error(w, "渲染列表页失败: "+err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// indexPage 是列表页的数据。
+//
+// 比直接传 []indexRow 多包一层是为了带上操作结果提示：删除完成后要重定向回
+// 列表页，用户得知道刚才那一下到底删掉了没有。
+type indexPage struct {
+	Rows   []indexRow
+	Notice string
+	Error  string
 }
 
 // countFindings 统计一次运行里"保留"与"丢弃"的意见数。
@@ -270,6 +292,39 @@ func (s *Server) handleRereview(w http.ResponseWriter, r *http.Request) {
 	redirectToRun(w, r, newRun.ID, "增量重审完成，未改动文件的意见已原样保留", "")
 }
 
+// handleDelete 处理"删除这条审查记录"的表单提交。
+//
+// 不走 beginAction：删除不需要模型，reviewer 为 nil 时也必须能用。
+// 删完回列表页而不是详情页——那条记录已经没了，详情页只会 404。
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "该端点只接受 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "解析表单失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	runID := r.FormValue("run")
+	if runID == "" {
+		http.Error(w, "缺少运行记录 id", http.StatusBadRequest)
+		return
+	}
+
+	deleted, err := s.source.DeleteRun(r.Context(), runID)
+	if err != nil {
+		redirectToIndex(w, r, "", "删除失败: "+err.Error())
+		return
+	}
+	if !deleted {
+		// 不当作错误：多半是用户在两个标签页里各点了一次删除。记录已经
+		// 不在了，用户想要的结果已经达成，只是提示措辞要说实话。
+		redirectToIndex(w, r, "", "记录不存在，可能已被删除: "+runID)
+		return
+	}
+	redirectToIndex(w, r, "已删除记录 "+runID, "")
+}
+
 // beginAction 是两个 POST 端点共用的前置检查：方法、reviewer 是否就绪、
 // 必填参数。ok 为 false 时响应已经写好，调用方直接返回即可。
 //
@@ -310,6 +365,21 @@ func (s *Server) beginAction(w http.ResponseWriter, r *http.Request, findingPara
 func redirectToRun(w http.ResponseWriter, r *http.Request, runID, notice, errMsg string) {
 	target := url.URL{Path: "/run"}
 	q := url.Values{"id": {runID}}
+	if notice != "" {
+		q.Set("notice", notice)
+	}
+	if errMsg != "" {
+		q.Set("error", errMsg)
+	}
+	target.RawQuery = q.Encode()
+	http.Redirect(w, r, target.String(), http.StatusSeeOther)
+}
+
+// redirectToIndex 与 redirectToRun 同理，只是落点是列表页——删除之后
+// 详情页已经不存在了，只能回列表。
+func redirectToIndex(w http.ResponseWriter, r *http.Request, notice, errMsg string) {
+	target := url.URL{Path: "/"}
+	q := url.Values{}
 	if notice != "" {
 		q.Set("notice", notice)
 	}

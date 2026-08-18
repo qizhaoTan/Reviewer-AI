@@ -23,6 +23,11 @@ type fakeSource struct {
 	runs    []store.Run
 	listErr error
 	loadErr error
+
+	// deleteErr 让测试模拟持久化层失败；deleted 记录 handler 实际请求删除的 ID，
+	// 用来断言"按钮上的 ID 确实传到了 store"。用指针是因为 fakeSource 按值传递。
+	deleteErr error
+	deleted   *[]string
 }
 
 func (f fakeSource) ListAllRuns(_ context.Context, limit int) ([]store.Run, error) {
@@ -45,6 +50,21 @@ func (f fakeSource) LoadRun(_ context.Context, id string) (*store.Run, error) {
 		}
 	}
 	return nil, nil
+}
+
+func (f fakeSource) DeleteRun(_ context.Context, id string) (bool, error) {
+	if f.deleteErr != nil {
+		return false, f.deleteErr
+	}
+	if f.deleted != nil {
+		*f.deleted = append(*f.deleted, id)
+	}
+	for i := range f.runs {
+		if f.runs[i].ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func get(t *testing.T, source RunSource, target string) *httptest.ResponseRecorder {
@@ -853,6 +873,188 @@ func TestReplyBannerIsEscaped(t *testing.T) {
 			body := rec.Body.String()
 			if strings.Contains(body, "<script>alert(1)</script>") || strings.Contains(body, "<img src=x onerror=") {
 				t.Error("query-parameter content reached the page unescaped")
+			}
+		})
+	}
+}
+
+// TestHandleDelete 覆盖删除端点：正常删除、记录不存在、持久化失败、
+// 缺 run 参数、以及 GET 不该生效。
+func TestHandleDelete(t *testing.T) {
+	run := store.Run{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}
+
+	tests := []struct {
+		name      string
+		method    string
+		form      url.Values
+		deleteErr error
+		wantCode  int
+		// wantLocation 非空时断言重定向目标包含这些片段。
+		wantLocation []string
+		wantDeleted  []string // 实际传到 store 的 ID
+	}{
+		{
+			name:         "a valid delete removes the run and returns to the index",
+			method:       http.MethodPost,
+			form:         url.Values{"run": {"run-1"}},
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"/?", "notice="},
+			wantDeleted:  []string{"run-1"},
+		},
+		{
+			// 两个标签页各点一次删除时会走到这里。记录已经不在，用户想要的
+			// 结果已经达成，所以不是错误状态码，只是提示措辞要说实话。
+			name:         "deleting a missing run reports it without failing",
+			method:       http.MethodPost,
+			form:         url.Values{"run": {"nope"}},
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"/?", "error="},
+			wantDeleted:  []string{"nope"},
+		},
+		{
+			name:         "a store failure comes back as a message not a 500",
+			method:       http.MethodPost,
+			form:         url.Values{"run": {"run-1"}},
+			deleteErr:    errors.New("database is locked"),
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"error=", "database+is+locked"},
+		},
+		{
+			name:     "a missing run id is a bad request",
+			method:   http.MethodPost,
+			form:     url.Values{},
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			// 删除是破坏性的，绝不能被一个预取链接的浏览器插件触发。
+			name:     "a GET never deletes anything",
+			method:   http.MethodGet,
+			form:     url.Values{"run": {"run-1"}},
+			wantCode: http.StatusMethodNotAllowed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleted []string
+			source := fakeSource{runs: []store.Run{run}, deleteErr: tt.deleteErr, deleted: &deleted}
+
+			var req *http.Request
+			if tt.method == http.MethodPost {
+				req = postForm("/delete", tt.form)
+			} else {
+				req = httptest.NewRequest(tt.method, "/delete?"+tt.form.Encode(), nil)
+			}
+			rec := serve(t, source, nil, req)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantCode, rec.Body.String())
+			}
+			for _, want := range tt.wantLocation {
+				if got := rec.Header().Get("Location"); !strings.Contains(got, want) {
+					t.Errorf("Location %q does not contain %q", got, want)
+				}
+			}
+			if strings.Join(deleted, ",") != strings.Join(tt.wantDeleted, ",") {
+				t.Errorf("deleted ids = %v, want %v", deleted, tt.wantDeleted)
+			}
+		})
+	}
+}
+
+// TestHandleDeleteWorksWithoutReviewer 固定住"删除不依赖模型"这条：
+// 配置里没有 API key 时 reviewer 为 nil，而清理一条跑坏的记录恰恰是
+// 这种时候最想做的事，不能跟着 503。
+func TestHandleDeleteWorksWithoutReviewer(t *testing.T) {
+	tests := []struct{ name string }{{name: "read-only deployment can still delete"}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleted []string
+			source := fakeSource{
+				runs:    []store.Run{{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}},
+				deleted: &deleted,
+			}
+			rec := serve(t, source, nil, postForm("/delete", url.Values{"run": {"run-1"}}))
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			if len(deleted) != 1 || deleted[0] != "run-1" {
+				t.Errorf("deleted = %v, want [run-1]", deleted)
+			}
+		})
+	}
+}
+
+// TestIndexRendersDeleteControls 固定住列表页上删除入口的存在与形态：
+// 必须是 POST 表单（GET 会被预取）、必须带上这一行的 run id、必须有二次确认。
+func TestIndexRendersDeleteControls(t *testing.T) {
+	tests := []struct {
+		name     string
+		runs     []store.Run
+		wantHTML []string
+		skipHTML []string
+	}{
+		{
+			name: "each row carries a confirming delete form",
+			runs: []store.Run{{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}},
+			wantHTML: []string{
+				`method="post"`,
+				`action="/delete"`,
+				`name="run" value="run-1"`,
+				"confirm(",
+			},
+		},
+		{
+			// 一条记录都没有时不该渲染出任何删除表单。
+			name:     "an empty index has no delete form",
+			runs:     nil,
+			skipHTML: []string{`action="/delete"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(t, fakeSource{runs: tt.runs}, "/")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			body := rec.Body.String()
+			for _, want := range tt.wantHTML {
+				if !strings.Contains(body, want) {
+					t.Errorf("index page missing %q", want)
+				}
+			}
+			for _, skip := range tt.skipHTML {
+				if strings.Contains(body, skip) {
+					t.Errorf("index page unexpectedly contains %q", skip)
+				}
+			}
+		})
+	}
+}
+
+// TestIndexBannerIsEscaped 固定住列表页提示的转义：notice/error 来自查询
+// 参数，任何人都能构造，直接插进 HTML 就是一个反射型 XSS。
+func TestIndexBannerIsEscaped(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "notice", target: "/?notice=%3Cscript%3Ealert(1)%3C%2Fscript%3E"},
+		{name: "error", target: "/?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(t, fakeSource{}, tt.target)
+			body := rec.Body.String()
+			if strings.Contains(body, "<script>alert(1)</script>") {
+				t.Error("banner rendered raw HTML from a query parameter")
+			}
+			if !strings.Contains(body, "&lt;script&gt;") {
+				t.Errorf("escaped banner text not found in body: %s", body)
 			}
 		})
 	}
