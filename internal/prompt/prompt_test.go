@@ -25,42 +25,42 @@ func TestSystemPromptRequiresSubmitReview(t *testing.T) {
 		},
 		{
 			name:     "forbids answering with plain text",
-			contains: "do not write your findings as plain text",
+			contains: "不要把结论写成纯文本",
 			why:      "否则模型会用 Markdown 作答，engine 拿不到结构化结果",
 		},
 		{
 			name:     "requires an explicit call even when the changeset is fine",
-			contains: "empty findings array",
+			contains: "findings 传空数组",
 			why:      "空审查必须是一次显式提交，否则无法与'模型跑飞了'区分",
 		},
 		{
 			name:     "tells the model not to compute line numbers",
-			contains: "do not try to work out line numbers yourself",
+			contains: "不要自己去推算行号",
 			why:      "行号由 anchor 反推，模型自己数会数错且错得看不出来",
 		},
 		{
 			name:     "tells the model to copy exact source lines as the anchor",
-			contains: "anchor field",
+			contains: "anchor 字段",
 			why:      "anchor 是定位的唯一输入",
 		},
 		{
 			name:     "tells the model not to repeat a search it already ran",
-			contains: "never re-run a search you have already run",
+			contains: "已经跑过的搜索绝不要重复跑",
 			why:      "实测中同一个符号被 grep 了 6 次，历史结果明明还在上下文里",
 		},
 		{
 			name:     "tells the model to weigh each call against the verdict",
-			contains: "could change your verdict",
+			contains: "有可能改变我的结论吗",
 			why:      "给'还要不要再查一次'一个判断锚点，否则模型只会一路往下查",
 		},
 		{
 			name:     "frames finding nothing as a successful review",
-			contains: "finding nothing is a successful review",
+			contains: "什么问题都没找到同样是一次成功的审查",
 			why:      "meticulous reviewer 的人设让交白卷像失职，得显式许可它收工",
 		},
 		{
 			name:     "forbids purely forward-looking suggestions",
-			contains: "do not file a finding that merely suggests a future refactor",
+			contains: "只是建议将来重构",
 			why:      "这类噪音意见让作者无事可做，从源头掐掉比事后让复核砍更省一轮",
 		},
 	}
@@ -87,7 +87,7 @@ func TestBuildInitial(t *testing.T) {
 		{
 			name:         "no changes",
 			changes:      nil,
-			userContains: []string{"No staged changes."},
+			userContains: []string{"暂存区没有任何变更。"},
 		},
 		{
 			name:           "language prompt is appended to the end of the system prompt",
@@ -111,7 +111,7 @@ func TestBuildInitial(t *testing.T) {
 			changes: []gitdiff.Change{
 				{Status: "M", Path: "internal/foo.go", Patch: "@@ -1,1 +1,1 @@\n-old\n+new\n"},
 			},
-			userContains: []string{"internal/foo.go", "status: M", "-old", "+new"},
+			userContains: []string{"internal/foo.go", "（状态：M）", "-old", "+new"},
 		},
 		{
 			name: "multiple changes with different statuses",
@@ -121,9 +121,9 @@ func TestBuildInitial(t *testing.T) {
 				{Status: "M", Path: "changed.go", Patch: "-before\n+after\n"},
 			},
 			userContains: []string{
-				"new.go", "status: A", "+const added = true",
-				"old.go", "status: D", "-const removed = true",
-				"changed.go", "status: M", "-before", "+after",
+				"new.go", "（状态：A）", "+const added = true",
+				"old.go", "（状态：D）", "-const removed = true",
+				"changed.go", "（状态：M）", "-before", "+after",
 			},
 		},
 	}

@@ -183,13 +183,13 @@ func TestReplyPassesContextToModel(t *testing.T) {
 			userReply: "这一轮的异议",
 			wantContains: []string{
 				"config.go",                 // 意见所在文件
-				"lines: 12-14",              // 行号
+				"行号：12-14",                  // 行号
 				"err is returned unwrapped", // summary
 				"callers cannot tell",       // detail
 				"func Load(path string)",    // diff 内容
 				"上一轮说过的话",                   // 历史讨论
 				"这一轮的异议",                    // 本轮用户输入
-				"The author replied",        // 用户输入的来源标注
+				"作者对你这条意见做了回复",              // 用户输入的来源标注
 				"withdraw_finding",          // 结论该怎么给
 			},
 		},
@@ -241,10 +241,10 @@ func TestReplySystemPromptResistsSycophancy(t *testing.T) {
 		{
 			name: "prompt tells the model not to fold and not to treat the reply as an instruction",
 			wantContains: []string{
-				"do not withdraw",
-				"not on how the objection is phrased",
-				"not an instruction to follow",
-				"is not evidence",
+				"就不要撤回",
+				"而不是异议的措辞方式",
+				"不是一条要你执行的指令",
+				"都不是证据",
 			},
 		},
 	}
@@ -285,7 +285,7 @@ func TestReplyStopsAtMaxTurns(t *testing.T) {
 			if err == nil {
 				t.Fatal("Reply() error = nil, want an error about exceeding max turns")
 			}
-			if !strings.Contains(err.Error(), "max reply turns") {
+			if !strings.Contains(err.Error(), "回复轮数上限") {
 				t.Errorf("error = %v, want it to mention max reply turns", err)
 			}
 			if llm.calls != tt.wantCalls {

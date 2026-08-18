@@ -134,7 +134,7 @@ func TestGlob(t *testing.T) {
 		{
 			name:          "no matches",
 			args:          GlobInput{Pattern: "**/*.rb"},
-			outputContain: []string{"no files matched"},
+			outputContain: []string{"没有文件匹配模式"},
 		},
 	}
 

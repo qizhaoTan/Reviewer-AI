@@ -56,10 +56,10 @@ func (d *callDeduper) record(tc schema.ToolCall, round int) {
 // 只说"重复了"而不给出路，模型很可能换个等价写法再查一遍。
 func repeatNotice(tc schema.ToolCall, round int) string {
 	return fmt.Sprintf(
-		"Skipped: you already called %s with these exact arguments in round %d, and that result is still in this conversation above. "+
-			"Scroll back and re-read it instead of searching again. "+
-			"If you already have what you need to judge this changeset, call %s now.",
-		tc.Name, round, "submit_review")
+		"已跳过：你在第 %d 轮就用完全相同的参数调用过 %s，那次的结果还在上面的对话里。"+
+			"回头重读那条结果，不要再搜一遍。"+
+			"如果判断这批改动所需的信息你已经有了，现在就调用 %s。",
+		round, tc.Name, "submit_review")
 }
 
 // callFingerprint 为一次工具调用算出指纹：工具名 + 规范化后的参数。

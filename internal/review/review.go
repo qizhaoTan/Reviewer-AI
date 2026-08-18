@@ -200,7 +200,7 @@ func NormalizeReport(r Report) (Report, error) {
 		Findings: make([]Finding, 0, len(r.Findings)),
 	}
 	if out.Summary == "" {
-		return Report{}, fmt.Errorf("summary is empty; provide a one-paragraph overall assessment of the changeset, even when there are no findings")
+		return Report{}, fmt.Errorf("summary 为空；请用一段话给出对这批改动的整体评价，即使一条意见都没有也要写")
 	}
 
 	for i, f := range r.Findings {
@@ -218,14 +218,14 @@ func NormalizeReport(r Report) (Report, error) {
 func normalizeFinding(f Finding, index int) (Finding, error) {
 	file := strings.TrimSpace(f.File)
 	if file == "" {
-		return Finding{}, fmt.Errorf("findings[%d].file is empty; set it to the repo-relative path of the file this finding is about (one of the files in the staged changeset)", index)
+		return Finding{}, fmt.Errorf("findings[%d].file 为空；请填上这条意见所针对文件的仓库相对路径（必须是本次暂存区改动中的某个文件）", index)
 	}
 	summary := strings.TrimSpace(f.Summary)
 	if summary == "" {
-		return Finding{}, fmt.Errorf("findings[%d].summary is empty; state the problem in one sentence, and put any longer explanation in detail", index)
+		return Finding{}, fmt.Errorf("findings[%d].summary 为空；请用一句话说明问题，更长的解释放到 detail 里", index)
 	}
 	if !f.Severity.Valid() {
-		return Finding{}, fmt.Errorf("findings[%d].severity is %q; use one of %s", index, f.Severity, severityList())
+		return Finding{}, fmt.Errorf("findings[%d].severity 是 %q；请使用 %s 之一", index, f.Severity, severityList())
 	}
 	return Finding{
 		ID:       findingID(index),

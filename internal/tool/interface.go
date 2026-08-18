@@ -34,5 +34,5 @@ func FindToolByName(tools []ITool, name string) (ITool, error) {
 			return t, nil
 		}
 	}
-	return nil, fmt.Errorf("tool %q not found", name)
+	return nil, fmt.Errorf("找不到名为 %q 的工具", name)
 }

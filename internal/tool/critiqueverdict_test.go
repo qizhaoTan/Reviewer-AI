@@ -37,17 +37,17 @@ func TestCritiqueVerdictExecute(t *testing.T) {
 		{
 			name:            "rejects a missing reason when keeping",
 			args:            `{"keep":true}`,
-			wantErrContains: []string{"reason is empty", "keeping"},
+			wantErrContains: []string{"reason 为空", "保留"},
 		},
 		{
 			name:            "rejects a missing reason when dropping",
 			args:            `{"keep":false,"reason":"   "}`,
-			wantErrContains: []string{"reason is empty", "dropping"},
+			wantErrContains: []string{"reason 为空", "丢弃"},
 		},
 		{
 			name:            "rejects malformed json",
 			args:            `{"keep": tru`,
-			wantErrContains: []string{"not valid JSON", `"keep"`},
+			wantErrContains: []string{"不是合法的 JSON", `"keep"`},
 		},
 	}
 

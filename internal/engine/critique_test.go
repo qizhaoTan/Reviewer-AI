@@ -287,7 +287,7 @@ func TestCritiqueMaxTurns(t *testing.T) {
 		{
 			name:     "gives up after the turn budget and keeps the finding",
 			maxTurns: 3, turnsBeforeVerdict: 99,
-			wantKept: true, wantReasonContains: "exceeded max critique turns (3)",
+			wantKept: true, wantReasonContains: "超过复核轮数上限（3）",
 		},
 		{
 			name:     "finishes within budget",
@@ -347,7 +347,7 @@ func TestBuildCritiqueMessages(t *testing.T) {
 				Detail: "wrap it", Anchor: "return nil, err",
 			},
 			patch:        testPatch,
-			wantContains: []string{"config.go", "lines: 12-14", "error", "swallowed error", "wrap it", "return nil, err", "```diff"},
+			wantContains: []string{"config.go", "行号：12-14", "error", "swallowed error", "wrap it", "return nil, err", "```diff"},
 		},
 		{
 			name: "single line finding renders one line number",
@@ -356,7 +356,7 @@ func TestBuildCritiqueMessages(t *testing.T) {
 				Severity: review.SeverityInfo, Summary: "note",
 			},
 			patch:        testPatch,
-			wantContains: []string{"line: 13"},
+			wantContains: []string{"行号：13"},
 			wantExcludes: []string{"lines: 13-13"},
 		},
 		{
@@ -373,7 +373,7 @@ func TestBuildCritiqueMessages(t *testing.T) {
 				ID: "f1", File: "gone.go", Severity: review.SeverityInfo, Summary: "note",
 			},
 			patch:        "",
-			wantContains: []string{"No diff is available for gone.go"},
+			wantContains: []string{"没有 gone.go 的 diff 可供参考"},
 		},
 	}
 
@@ -416,9 +416,9 @@ func TestCritiqueSystemPromptPushesBack(t *testing.T) {
 		name     string
 		contains string
 	}{
-		{name: "tells the critic that dropping is its job", contains: "dropping a weak comment is your job"},
-		{name: "tells the critic to verify against real code", contains: "go read that function"},
-		{name: "forbids adding or editing findings", contains: "cannot edit the comment or add new ones"},
+		{name: "tells the critic that dropping is its job", contains: "丢掉一条站不住的意见是你的本职工作"},
+		{name: "tells the critic to verify against real code", contains: "就去把那个函数读出来"},
+		{name: "forbids adding or editing findings", contains: "你不能修改这条意见，也不能新增意见"},
 		{name: "names the verdict tool", contains: "submit_verdict"},
 	}
 

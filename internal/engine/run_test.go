@@ -179,7 +179,7 @@ func TestRun(t *testing.T) {
 				var nudged bool
 				for _, m := range run.Messages {
 					if m.Role == schema.RoleUser && strings.Contains(m.Content, tool.SubmitReviewName) &&
-						strings.Contains(m.Content, "has not been recorded") {
+						strings.Contains(m.Content, "还没有被记录") {
 						nudged = true
 					}
 				}

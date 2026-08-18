@@ -59,23 +59,23 @@ func (WithdrawFindingTool) Execute(_ context.Context, _ string, args json.RawMes
 	var w Withdrawal
 	if err := json.Unmarshal(args, &w); err != nil {
 		return Result{
-			Output: fmt.Sprintf("%s arguments are not valid JSON (%v). Call it again with an object like "+
-				`{"reason": "..."}.`, WithdrawFindingName, err),
+			Output: fmt.Sprintf("%s 的参数不是合法的 JSON（%v）。请用类似 "+
+				`{"reason": "..."}`+" 的对象重新调用。", WithdrawFindingName, err),
 			IsError: true,
 		}
 	}
 	w.Reason = strings.TrimSpace(w.Reason)
 	if w.Reason == "" {
 		return Result{
-			Output: fmt.Sprintf("%s: reason is empty; state in one or two sentences which part of the author's objection convinced you. "+
-				"If nothing convinced you, do not call this tool at all — explain your disagreement in plain text instead.",
+			Output: fmt.Sprintf("%s：reason 为空；请用一两句话说明作者异议中的哪一点说服了你。"+
+				"如果并没有任何一点说服你，就根本不该调用这个工具——直接用纯文本说明你为什么不认同。",
 				WithdrawFindingName),
 			IsError: true,
 		}
 	}
 
 	return Result{
-		Output:     "Finding withdrawn.",
+		Output:     "该条意见已撤回。",
 		Withdrawal: &w,
 	}
 }

@@ -100,8 +100,8 @@ func (t SubmitReviewTool) Execute(_ context.Context, _ string, args json.RawMess
 	var input review.Report
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{
-			Output: fmt.Sprintf("%s arguments are not valid JSON (%v). Call it again with an object like "+
-				`{"summary": "...", "findings": [{"file": "path/to/file.go", "anchor": "the exact lines at fault", "severity": "warning", "summary": "..."}]}.`,
+			Output: fmt.Sprintf("%s 的参数不是合法的 JSON（%v）。请用类似 "+
+				`{"summary": "...", "findings": [{"file": "path/to/file.go", "anchor": "有问题的那几行原文", "severity": "warning", "summary": "..."}]}`+" 的对象重新调用。",
 				SubmitReviewName, err),
 			IsError: true,
 		}
@@ -121,7 +121,7 @@ func (t SubmitReviewTool) Execute(_ context.Context, _ string, args json.RawMess
 	normalized.Findings = review.ResolveAnchors(normalized.Findings, t.Changes)
 
 	return Result{
-		Output:       fmt.Sprintf("Review submitted: %d finding(s) recorded.", len(normalized.Findings)),
+		Output:       fmt.Sprintf("审查结果已提交：记录了 %d 条意见。", len(normalized.Findings)),
 		ReviewResult: &normalized,
 	}
 }
@@ -141,9 +141,9 @@ func (t SubmitReviewTool) validateFiles(r review.Report) error {
 	}
 	for i, f := range r.Findings {
 		if _, ok := changed[f.File]; !ok {
-			return fmt.Errorf("findings[%d].file is %q, which is not part of this staged changeset. "+
-				"Only report problems in the changed files (%s). "+
-				"If the real problem is in an unchanged file, report it against the changed file that depends on it and explain the connection in detail",
+			return fmt.Errorf("findings[%d].file 是 %q，它不属于本次暂存区改动。"+
+				"只能上报这些改动文件里的问题（%s）。"+
+				"如果真正的问题出在一个未改动的文件里，请把它挂在依赖它的那个改动文件上，并在 detail 里说清两者的关联",
 				i, f.File, strings.Join(changedPaths(t.Changes), ", "))
 		}
 	}

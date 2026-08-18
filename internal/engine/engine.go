@@ -109,8 +109,8 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 			log.Info("模型未调用任何工具，提示它用 submit_review 收尾")
 			msgs = append(msgs, schema.Message{
 				Role: schema.RoleUser,
-				Content: fmt.Sprintf("Your review has not been recorded: a review is only accepted through the %s tool. "+
-					"Call %s now with your findings (or an empty findings array if the changeset looks fine).",
+				Content: fmt.Sprintf("你的审查结果还没有被记录：审查结果只能通过 %s 工具提交。"+
+					"现在就调用 %s 并给出你的意见（如果这批改动看起来没问题，findings 传空数组）。",
 					tool.SubmitReviewName, tool.SubmitReviewName),
 			})
 			setMessages(ctx, deps.Store, run, msgs)
@@ -138,7 +138,7 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 			var result tool.Result
 			if t, err := tool.FindToolByName(deps.Tools, tc.Name); err != nil {
 				result = tool.Result{
-					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),
+					Output:  fmt.Sprintf("未知工具 %q，不存在这个工具。只能使用本次会话中提供给你的那些工具。", tc.Name),
 					IsError: true,
 				}
 			} else {

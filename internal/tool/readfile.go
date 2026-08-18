@@ -70,7 +70,7 @@ func ReadFileDefinition() schema.ToolDefinition {
 func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input ReadFileInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return Result{Output: fmt.Sprintf("read_file arguments are not valid JSON (%v). Call read_file again with a JSON object like {\"path\": \"relative/path.go\"}.", err), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file 的参数不是合法的 JSON（%v）。请用类似 {\"path\": \"relative/path.go\"} 的 JSON 对象重新调用 read_file。", err), IsError: true}
 	}
 
 	resolved, err := resolveWithinRoot(repoRoot, input.Path)
@@ -80,27 +80,27 @@ func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result
 
 	info, err := os.Stat(resolved)
 	if os.IsNotExist(err) {
-		return Result{Output: fmt.Sprintf("read_file: %q does not exist in the repository. Double-check the path (it must be relative to the repo root, e.g. \"internal/foo/bar.go\") and retry.", input.Path), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：仓库中不存在 %q。请核对路径（必须是相对于仓库根目录的路径，例如 \"internal/foo/bar.go\"）后重试。", input.Path), IsError: true}
 	}
 	if err != nil {
-		return Result{Output: fmt.Sprintf("read_file: could not stat %q (%v). Try a different path.", input.Path, err), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：无法获取 %q 的文件信息（%v）。请换一个路径试试。", input.Path, err), IsError: true}
 	}
 	if info.IsDir() {
-		return Result{Output: fmt.Sprintf("read_file: %q is a directory, not a file. Provide the path to a specific file inside it instead.", input.Path), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：%q 是目录而不是文件。请改为提供该目录下某个具体文件的路径。", input.Path), IsError: true}
 	}
 	if !info.Mode().IsRegular() {
-		return Result{Output: fmt.Sprintf("read_file: %q is not a regular file (e.g. a device or socket) and cannot be read. Choose a different path.", input.Path), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：%q 不是普通文件（例如设备或套接字），无法读取。请换一个路径。", input.Path), IsError: true}
 	}
 	if info.Size() > maxReadBytes {
-		return Result{Output: fmt.Sprintf("read_file: %q is %d bytes, which exceeds the %d byte limit. Re-request it with start_line/end_line to read a smaller slice instead of the whole file.", input.Path, info.Size(), maxReadBytes), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：%q 有 %d 字节，超过了 %d 字节的上限。请改用 start_line/end_line 读取其中一小段，而不是整个文件。", input.Path, info.Size(), maxReadBytes), IsError: true}
 	}
 
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return Result{Output: fmt.Sprintf("read_file: could not read %q (%v). Try a different path.", input.Path, err), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：无法读取 %q（%v）。请换一个路径试试。", input.Path, err), IsError: true}
 	}
 	if isBinary(data) {
-		return Result{Output: fmt.Sprintf("read_file: %q appears to be a binary file and cannot be shown as text. Skip it or pick a different, text-based file.", input.Path), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：%q 看起来是二进制文件，无法以文本形式展示。请跳过它，或换一个文本文件。", input.Path), IsError: true}
 	}
 
 	return renderLines(input.Path, data, input.StartLine, input.EndLine)
@@ -109,19 +109,19 @@ func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result
 // resolveWithinRoot 把 repo 相对路径解析为绝对路径，并确保结果不逃逸出 root。
 func resolveWithinRoot(root, path string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("read_file: path must not be empty. Provide a repo-relative file path, e.g. \"internal/foo/bar.go\"")
+		return "", fmt.Errorf("read_file：path 不能为空。请提供相对于仓库根目录的文件路径，例如 \"internal/foo/bar.go\"")
 	}
 	if strings.ContainsRune(path, 0) {
-		return "", fmt.Errorf("read_file: path %q contains a NUL byte, which is not a valid file path. Provide a plain repo-relative path", path)
+		return "", fmt.Errorf("read_file：路径 %q 含有 NUL 字节，不是合法的文件路径。请提供一个普通的、相对于仓库根目录的路径", path)
 	}
 	if filepath.IsAbs(path) {
-		return "", fmt.Errorf("read_file: path %q is absolute, but only repo-relative paths are allowed. Strip the leading %q and retry (e.g. use \"internal/foo/bar.go\" instead of the full path)", path, string(filepath.Separator))
+		return "", fmt.Errorf("read_file：路径 %q 是绝对路径，但这里只接受相对于仓库根目录的路径。请去掉开头的 %q 后重试（例如用 \"internal/foo/bar.go\" 而不是完整路径）", path, string(filepath.Separator))
 	}
 
 	rootAbs := filepath.Clean(root)
 	candidate := filepath.Clean(filepath.Join(rootAbs, path))
 	if !withinRoot(rootAbs, candidate) {
-		return "", fmt.Errorf("read_file: path %q resolves outside the repository root (likely due to \"..\" segments). Only files inside the repository can be read; provide a path relative to the repo root that does not escape it", path)
+		return "", fmt.Errorf("read_file：路径 %q 解析后落在了仓库根目录之外（通常是因为其中的 \"..\"）。只能读取仓库内部的文件；请提供一个不会跳出仓库根目录的相对路径", path)
 	}
 
 	// 二次校验：解析软链接后再次确认没有逃逸出仓库根目录。
@@ -129,7 +129,7 @@ func resolveWithinRoot(root, path string) (string, error) {
 	if resolvedRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
 		if resolvedCandidate, err := filepath.EvalSymlinks(candidate); err == nil {
 			if !withinRoot(resolvedRoot, resolvedCandidate) {
-				return "", fmt.Errorf("read_file: path %q is a symlink that points outside the repository root. Files outside the repository cannot be read; choose a different path", path)
+				return "", fmt.Errorf("read_file：路径 %q 是一个指向仓库根目录之外的软链接。仓库外的文件无法读取；请换一个路径", path)
 			}
 		}
 	}
@@ -178,9 +178,9 @@ func renderLines(path string, data []byte, startLine, endLine int) Result {
 		end = total
 	}
 	if start > end {
-		return Result{Output: fmt.Sprintf("read_file: requested range start_line=%d end_line=%d for %q is invalid because start_line is after end_line (file has %d lines). Swap or fix the two values, e.g. start_line=%d end_line=%d.", startLine, endLine, path, total, end, start), IsError: true}
+		return Result{Output: fmt.Sprintf("read_file：为 %[3]q 请求的范围 start_line=%[1]d end_line=%[2]d 不合法，因为 start_line 在 end_line 之后（该文件共 %[4]d 行）。请调换或修正这两个值，例如 start_line=%[5]d end_line=%[6]d。", startLine, endLine, path, total, end, start), IsError: true}
 	}
 
 	selected := lines[start-1 : end]
-	return Result{Output: fmt.Sprintf("%s (lines %d-%d of %d):\n%s", path, start, end, total, strings.Join(selected, "\n"))}
+	return Result{Output: fmt.Sprintf("%s（第 %d-%d 行，共 %d 行）：\n%s", path, start, end, total, strings.Join(selected, "\n"))}
 }

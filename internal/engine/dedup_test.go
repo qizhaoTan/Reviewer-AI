@@ -131,7 +131,7 @@ func TestRepeatNotice(t *testing.T) {
 			name:     "mentions tool name, round and the way out",
 			tc:       call("grep", `{"pattern":"x"}`),
 			round:    3,
-			contains: []string{"grep", "round 3", "submit_review", "Skipped"},
+			contains: []string{"grep", "第 3 轮", "submit_review", "已跳过"},
 		},
 	}
 

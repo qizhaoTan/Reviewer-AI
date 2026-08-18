@@ -122,33 +122,33 @@ func TestSubmitReviewExecute(t *testing.T) {
 		{
 			name:            "rejects malformed json",
 			args:            `{"summary": "unterminated`,
-			wantErrContains: []string{"not valid JSON", `"findings"`},
+			wantErrContains: []string{"不是合法的 JSON", `"findings"`},
 		},
 		{
 			name:            "rejects a missing summary",
 			args:            `{"findings":[]}`,
-			wantErrContains: []string{"summary is empty", "even when there are no findings"},
+			wantErrContains: []string{"summary 为空", "即使一条意见都没有也要写"},
 		},
 		{
 			name: "rejects an unknown severity and lists the allowed values",
 			args: `{"summary":"ok","findings":[
 				{"file":"config.go","severity":"blocker","summary":"boom"}
 			]}`,
-			wantErrContains: []string{`severity is "blocker"`, `"info"`, `"warning"`, `"error"`},
+			wantErrContains: []string{`severity 是 "blocker"`, `"info"`, `"warning"`, `"error"`},
 		},
 		{
 			name: "rejects a finding with no summary",
 			args: `{"summary":"ok","findings":[
 				{"file":"config.go","severity":"info","summary":"  "}
 			]}`,
-			wantErrContains: []string{"findings[0].summary is empty", "one sentence"},
+			wantErrContains: []string{"findings[0].summary 为空", "用一句话说明问题"},
 		},
 		{
 			name: "rejects a file outside the staged changeset and lists what is available",
 			args: `{"summary":"ok","findings":[
 				{"file":"some/other.go","severity":"error","summary":"boom"}
 			]}`,
-			wantErrContains: []string{"not part of this staged changeset", `"config.go"`},
+			wantErrContains: []string{"不属于本次暂存区改动", `"config.go"`},
 		},
 		{
 			name: "reports the offending index when a later finding is invalid",

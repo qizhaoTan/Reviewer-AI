@@ -30,17 +30,17 @@ func TestWithdrawFindingExecute(t *testing.T) {
 			// 否则它会随手填一句废话把工具调完，把一次"我坚持"扭曲成"我撤回"。
 			name:            "rejects an empty reason and points at the alternative",
 			args:            `{"reason":"   "}`,
-			wantErrContains: []string{"reason is empty", "do not call this tool"},
+			wantErrContains: []string{"reason 为空", "就根本不该调用这个工具"},
 		},
 		{
 			name:            "rejects a missing reason",
 			args:            `{}`,
-			wantErrContains: []string{"reason is empty"},
+			wantErrContains: []string{"reason 为空"},
 		},
 		{
 			name:            "rejects malformed json",
 			args:            `{"reason": "unterminated`,
-			wantErrContains: []string{"not valid JSON", `"reason"`},
+			wantErrContains: []string{"不是合法的 JSON", `"reason"`},
 		},
 	}
 

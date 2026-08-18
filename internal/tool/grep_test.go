@@ -134,18 +134,18 @@ func TestGrep(t *testing.T) {
 			name:          "empty pattern is an error",
 			args:          GrepInput{Pattern: ""},
 			wantIsError:   true,
-			outputContain: []string{"pattern must not be empty"},
+			outputContain: []string{"pattern 不能为空"},
 		},
 		{
 			name:          "invalid output mode is an error",
 			args:          GrepInput{Pattern: "Foo", OutputMode: "bogus"},
 			wantIsError:   true,
-			outputContain: []string{"not supported"},
+			outputContain: []string{"不支持 output_mode"},
 		},
 		{
-			name:          "no matches",
+			name:          "没有内容匹配模式",
 			args:          GrepInput{Pattern: "NoSuchSymbolAnywhere"},
-			outputContain: []string{"no matches"},
+			outputContain: []string{"没有内容匹配模式"},
 		},
 	}
 

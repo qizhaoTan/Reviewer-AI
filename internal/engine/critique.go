@@ -109,7 +109,7 @@ func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, chan
 				// 保留而不是丢弃：见函数注释里对失败的处理原则。
 				log.Error("复核失败，保留该条意见", "findingID", f.ID, "error", err)
 				out.Findings[i].Kept = true
-				out.Findings[i].CritiqueReason = fmt.Sprintf("critique did not complete (%v); keeping the finding", err)
+				out.Findings[i].CritiqueReason = fmt.Sprintf("复核未能完成（%v），保留该条意见", err)
 				return nil
 			}
 			out.Findings[i].Kept = verdict.Keep
@@ -149,7 +149,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 		if len(resp.ToolCalls) == 0 {
 			msgs = append(msgs, schema.Message{
 				Role: schema.RoleUser,
-				Content: fmt.Sprintf("Your verdict has not been recorded: it is only accepted through the %s tool. Call %s now.",
+				Content: fmt.Sprintf("你的裁决还没有被记录：裁决只能通过 %s 工具提交。现在就调用 %s。",
 					tool.CritiqueVerdictName, tool.CritiqueVerdictName),
 			})
 			continue
@@ -159,7 +159,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 			var result tool.Result
 			if t, err := tool.FindToolByName(deps.Tools, tc.Name); err != nil {
 				result = tool.Result{
-					Output:  fmt.Sprintf("unknown tool %q; no such tool is available. Use only the tools provided in this session.", tc.Name),
+					Output:  fmt.Sprintf("未知工具 %q，不存在这个工具。只能使用本次会话中提供给你的那些工具。", tc.Name),
 					IsError: true,
 				}
 			} else {
@@ -176,21 +176,21 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 		}
 	}
 
-	return tool.Verdict{}, fmt.Errorf("exceeded max critique turns (%d) without calling %s", maxTurns, tool.CritiqueVerdictName)
+	return tool.Verdict{}, fmt.Errorf("超过复核轮数上限（%d）仍未调用 %s", maxTurns, tool.CritiqueVerdictName)
 }
 
 // critiqueSystemPrompt 定义复核者的角色。措辞的重点是压住"复核者倾向于附和
 // 初审"的倾向——同一个模型自我批判时，天然不容易否定自己，所以这里明确告诉它
 // 删掉没根据的意见是它的本职工作，而不是对同事的冒犯。
-const critiqueSystemPrompt = `You are a strict reviewer-of-reviews. Another reviewer has raised one comment about a staged code change, and your job is to decide whether that comment deserves to reach the author.
+const critiqueSystemPrompt = `你是一位严格的"审查意见的审查者"。另一位审查者针对一批暂存区代码改动提出了一条意见，你的工作是判断这条意见值不值得递到作者面前。
 
-Keep the comment only if it identifies a real problem the author should act on. Drop it if it is speculative, based on a misreading of the code, already handled elsewhere, or too trivial to be worth the author's attention.
+只有当这条意见指出了作者确实应该处理的真实问题时，才保留它。如果它属于臆测、建立在对代码的误读之上、其他地方已经处理过了，或者琐碎到不值得占用作者的注意力，就丢弃它。
 
-You have read-only tools (glob, grep, read_file) and you are expected to use them. Do not take the comment's claims at face value: if it says a function mishandles some input, go read that function. A comment that sounds plausible but does not survive contact with the actual code should be dropped.
+你有只读工具（glob、grep、read_file），并且被期望真的去用它们。不要把这条意见的说法照单全收：如果它说某个函数没处理好某种输入，就去把那个函数读出来。一条听上去有道理、但一接触真实代码就站不住的意见，应当被丢弃。
 
-Dropping a weak comment is your job, not a discourtesy — a review full of noise is worse than a short one. But do not drop a comment merely because it is inconvenient or hard to verify; if it holds up, keep it.
+丢掉一条站不住的意见是你的本职工作，不是对同事的冒犯——一份充满噪音的审查比一份简短的审查更糟。但也不要仅仅因为一条意见不方便处理或者不好核实就丢掉它；只要它站得住，就保留。
 
-You cannot edit the comment or add new ones. Your only output is a verdict: call the submit_verdict tool with keep=true or keep=false and a short reason.`
+你不能修改这条意见，也不能新增意见。你唯一的产出是一个裁决：调用 submit_verdict 工具，给出 keep=true 或 keep=false 以及一句简短的理由。`
 
 // buildCritiqueMessages 拼装单条意见的复核上下文：只给这一条意见和它所在文件的
 // diff，不给整个 changeset。上下文小意味着复核者不容易被别的文件带偏，也让并发
@@ -198,31 +198,31 @@ You cannot edit the comment or add new ones. Your only output is a verdict: call
 func buildCritiqueMessages(f review.Finding, patch, languagePrompt string) []schema.Message {
 	var b strings.Builder
 
-	b.WriteString("## Comment under examination\n\n")
-	fmt.Fprintf(&b, "- file: %s\n", f.File)
+	b.WriteString("## 待审查的意见\n\n")
+	fmt.Fprintf(&b, "- 文件：%s\n", f.File)
 	if f.StartLine > 0 {
 		if f.EndLine > f.StartLine {
-			fmt.Fprintf(&b, "- lines: %d-%d\n", f.StartLine, f.EndLine)
+			fmt.Fprintf(&b, "- 行号：%d-%d\n", f.StartLine, f.EndLine)
 		} else {
-			fmt.Fprintf(&b, "- line: %d\n", f.StartLine)
+			fmt.Fprintf(&b, "- 行号：%d\n", f.StartLine)
 		}
 	}
-	fmt.Fprintf(&b, "- severity: %s\n", f.Severity)
-	fmt.Fprintf(&b, "- summary: %s\n", f.Summary)
+	fmt.Fprintf(&b, "- 严重程度：%s\n", f.Severity)
+	fmt.Fprintf(&b, "- 摘要：%s\n", f.Summary)
 	if f.Detail != "" {
-		fmt.Fprintf(&b, "- detail: %s\n", f.Detail)
+		fmt.Fprintf(&b, "- 详情：%s\n", f.Detail)
 	}
 	if f.Anchor != "" {
-		fmt.Fprintf(&b, "\nThe code it points at:\n```\n%s\n```\n", f.Anchor)
+		fmt.Fprintf(&b, "\n它指向的代码：\n```\n%s\n```\n", f.Anchor)
 	}
 
 	if patch == "" {
-		fmt.Fprintf(&b, "\n(No diff is available for %s.)\n", f.File)
+		fmt.Fprintf(&b, "\n（没有 %s 的 diff 可供参考。）\n", f.File)
 	} else {
-		fmt.Fprintf(&b, "\n## Staged diff for %s\n\n```diff\n%s\n```\n", f.File, patch)
+		fmt.Fprintf(&b, "\n## %s 的暂存区 diff\n\n```diff\n%s\n```\n", f.File, patch)
 	}
 
-	b.WriteString("\nDecide whether this comment should reach the author, then call submit_verdict.")
+	b.WriteString("\n判断这条意见是否应该递到作者面前，然后调用 submit_verdict。")
 
 	return []schema.Message{
 		{Role: schema.RoleSystem, Content: prompt.WithLanguage(critiqueSystemPrompt, languagePrompt)},

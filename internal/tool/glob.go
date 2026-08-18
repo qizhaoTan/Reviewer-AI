@@ -58,7 +58,7 @@ func GlobDefinition() schema.ToolDefinition {
 func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input GlobInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return Result{Output: fmt.Sprintf("glob arguments are not valid JSON (%v). Call glob again with a JSON object like {\"pattern\": \"**/*.go\"}.", err), IsError: true}
+		return Result{Output: fmt.Sprintf("glob 的参数不是合法的 JSON（%v）。请用类似 {\"pattern\": \"**/*.go\"} 的 JSON 对象重新调用 glob。", err), IsError: true}
 	}
 	pattern := input.Pattern
 	if pattern == "" {
@@ -75,11 +75,11 @@ func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 		paths, err = globWithStdlib(repoRoot, pattern)
 	}
 	if err != nil {
-		return Result{Output: fmt.Sprintf("glob: %v. Check that the pattern is valid (e.g. \"**/*.go\", \"internal/*.go\") and retry.", err), IsError: true}
+		return Result{Output: fmt.Sprintf("glob：%v。请检查 pattern 是否合法（例如 \"**/*.go\"、\"internal/*.go\"）后重试。", err), IsError: true}
 	}
 
 	if len(paths) == 0 {
-		return Result{Output: fmt.Sprintf("glob: no files matched pattern %q.", pattern)}
+		return Result{Output: fmt.Sprintf("glob：没有文件匹配模式 %q。", pattern)}
 	}
 
 	sort.Strings(paths)

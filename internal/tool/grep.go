@@ -83,17 +83,17 @@ func GrepDefinition() schema.ToolDefinition {
 func Grep(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 	var input GrepInput
 	if err := json.Unmarshal(args, &input); err != nil {
-		return Result{Output: fmt.Sprintf("grep arguments are not valid JSON (%v). Call grep again with a JSON object like {\"pattern\": \"func Foo\"}.", err), IsError: true}
+		return Result{Output: fmt.Sprintf("grep 的参数不是合法的 JSON（%v）。请用类似 {\"pattern\": \"func Foo\"} 的 JSON 对象重新调用 grep。", err), IsError: true}
 	}
 	if input.Pattern == "" {
-		return Result{Output: "grep: pattern must not be empty. Provide a regular expression to search for, e.g. {\"pattern\": \"func Foo\"}.", IsError: true}
+		return Result{Output: "grep：pattern 不能为空。请提供要搜索的正则表达式，例如 {\"pattern\": \"func Foo\"}。", IsError: true}
 	}
 	mode := input.OutputMode
 	if mode == "" {
 		mode = outputModeFilesWithMatches
 	}
 	if mode != outputModeFilesWithMatches && mode != outputModeContent {
-		return Result{Output: fmt.Sprintf("grep: output_mode %q is not supported. Use %q or %q.", mode, outputModeFilesWithMatches, outputModeContent), IsError: true}
+		return Result{Output: fmt.Sprintf("grep：不支持 output_mode %q。请使用 %q 或 %q。", mode, outputModeFilesWithMatches, outputModeContent), IsError: true}
 	}
 
 	var (
@@ -106,11 +106,11 @@ func Grep(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 		matches, err = grepWithStdlib(repoRoot, input.Pattern, input.Glob, mode)
 	}
 	if err != nil {
-		return Result{Output: fmt.Sprintf("grep: %v. Check that pattern is a valid regular expression and glob (if provided) is a valid filename pattern, then retry.", err), IsError: true}
+		return Result{Output: fmt.Sprintf("grep：%v。请检查 pattern 是合法的正则表达式、glob（如果提供了）是合法的文件名模式，然后重试。", err), IsError: true}
 	}
 
 	if len(matches) == 0 {
-		return Result{Output: fmt.Sprintf("grep: no matches for pattern %q.", input.Pattern)}
+		return Result{Output: fmt.Sprintf("grep：没有内容匹配模式 %q。", input.Pattern)}
 	}
 
 	return Result{Output: renderGrepMatches(input.Pattern, matches, mode)}

@@ -58,29 +58,29 @@ func (CritiqueVerdictTool) Execute(_ context.Context, _ string, args json.RawMes
 	var v Verdict
 	if err := json.Unmarshal(args, &v); err != nil {
 		return Result{
-			Output: fmt.Sprintf("%s arguments are not valid JSON (%v). Call it again with an object like "+
-				`{"keep": false, "reason": "..."}.`, CritiqueVerdictName, err),
+			Output: fmt.Sprintf("%s 的参数不是合法的 JSON（%v）。请用类似 "+
+				`{"keep": false, "reason": "..."}`+" 的对象重新调用。", CritiqueVerdictName, err),
 			IsError: true,
 		}
 	}
 	v.Reason = strings.TrimSpace(v.Reason)
 	if v.Reason == "" {
 		return Result{
-			Output: fmt.Sprintf("%s: reason is empty; explain in one or two sentences why you are %s this comment.",
+			Output: fmt.Sprintf("%s：reason 为空；请用一两句话说明你为什么%s这条意见。",
 				CritiqueVerdictName, keepOrDropWord(v.Keep)),
 			IsError: true,
 		}
 	}
 
 	return Result{
-		Output:          fmt.Sprintf("Verdict recorded: %s.", keepOrDropWord(v.Keep)),
+		Output:          fmt.Sprintf("裁决已记录：%s该条意见。", keepOrDropWord(v.Keep)),
 		CritiqueVerdict: &v,
 	}
 }
 
 func keepOrDropWord(keep bool) string {
 	if keep {
-		return "keeping"
+		return "保留"
 	}
-	return "dropping"
+	return "丢弃"
 }

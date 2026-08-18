@@ -142,12 +142,12 @@ func TestNormalizeReport(t *testing.T) {
 		{
 			name:            "rejects empty summary",
 			in:              Report{Findings: []Finding{{File: "a.go", Severity: SeverityInfo, Summary: "x"}}},
-			wantErrContains: []string{"summary is empty", "even when there are no findings"},
+			wantErrContains: []string{"summary 为空", "即使一条意见都没有也要写"},
 		},
 		{
 			name:            "rejects whitespace only summary",
 			in:              Report{Summary: "   \n  "},
-			wantErrContains: []string{"summary is empty"},
+			wantErrContains: []string{"summary 为空"},
 		},
 		{
 			name: "rejects empty file with index and remedy",
@@ -158,7 +158,7 @@ func TestNormalizeReport(t *testing.T) {
 					{File: "", Severity: SeverityInfo, Summary: "orphan"},
 				},
 			},
-			wantErrContains: []string{"findings[1].file is empty", "repo-relative path"},
+			wantErrContains: []string{"findings[1].file 为空", "仓库相对路径"},
 		},
 		{
 			name: "rejects empty finding summary",
@@ -166,7 +166,7 @@ func TestNormalizeReport(t *testing.T) {
 				Summary:  "ok",
 				Findings: []Finding{{File: "a.go", Severity: SeverityInfo, Summary: "  "}},
 			},
-			wantErrContains: []string{"findings[0].summary is empty", "one sentence"},
+			wantErrContains: []string{"findings[0].summary 为空", "用一句话说明问题"},
 		},
 		{
 			name: "rejects unknown severity and lists the allowed values",
@@ -174,7 +174,7 @@ func TestNormalizeReport(t *testing.T) {
 				Summary:  "ok",
 				Findings: []Finding{{File: "a.go", Severity: "critical", Summary: "boom"}},
 			},
-			wantErrContains: []string{`findings[0].severity is "critical"`, `"info"`, `"warning"`, `"error"`},
+			wantErrContains: []string{`findings[0].severity 是 "critical"`, `"info"`, `"warning"`, `"error"`},
 		},
 		{
 			name: "accepts a finding without an anchor as a file level note",
