@@ -592,3 +592,185 @@ func TestListRuns(t *testing.T) {
 		})
 	}
 }
+
+func TestSaveFindingsRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  []review.Finding
+		updated  []review.Finding
+		wantIDs  []string
+		wantStat []review.FindingStatus
+	}{
+		{
+			name: "status and discussion survive a round trip",
+			initial: []review.Finding{
+				{ID: "f1", File: "a.go", Kept: true},
+				{ID: "f2", File: "b.go", Kept: true},
+			},
+			updated: []review.Finding{
+				{ID: "f1", File: "a.go", Kept: true},
+				{ID: "f2", File: "b.go", Kept: true, Status: review.StatusWithdrawn,
+					Discussion: []schema.Message{
+						{Role: schema.RoleUser, Content: "调用方已经处理了"},
+						{Role: schema.RoleAssistant, Content: "确实，撤回"},
+					}},
+			},
+			wantIDs:  []string{"f1", "f2"},
+			wantStat: []review.FindingStatus{"", review.StatusWithdrawn},
+		},
+		{
+			name:     "an empty list is stored as an empty array not null",
+			initial:  []review.Finding{{ID: "f1", File: "a.go"}},
+			updated:  nil,
+			wantIDs:  []string{},
+			wantStat: []review.FindingStatus{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			run := Run{ID: "r1", RepoPath: "/repo#main", Status: StatusCompleted, Findings: tt.initial}
+			if err := s.SaveRun(ctx, run); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+
+			if err := s.SaveFindings(ctx, "r1", tt.updated); err != nil {
+				t.Fatalf("SaveFindings: %v", err)
+			}
+
+			got, err := s.LoadRun(ctx, "r1")
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got == nil {
+				t.Fatal("LoadRun returned nil")
+			}
+			if len(got.Findings) != len(tt.wantIDs) {
+				t.Fatalf("len(Findings) = %d, want %d", len(got.Findings), len(tt.wantIDs))
+			}
+			for i := range tt.wantIDs {
+				if got.Findings[i].ID != tt.wantIDs[i] {
+					t.Errorf("Findings[%d].ID = %q, want %q", i, got.Findings[i].ID, tt.wantIDs[i])
+				}
+				if got.Findings[i].Status != tt.wantStat[i] {
+					t.Errorf("Findings[%d].Status = %q, want %q", i, got.Findings[i].Status, tt.wantStat[i])
+				}
+			}
+			// 讨论记录必须完整读回——它是判断撤回可不可信的依据。
+			for _, f := range got.Findings {
+				for _, want := range tt.updated {
+					if f.ID == want.ID && !reflect.DeepEqual(f.Discussion, want.Discussion) {
+						t.Errorf("Findings[%s].Discussion = %+v, want %+v", f.ID, f.Discussion, want.Discussion)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSaveFindingsLeavesOtherColumnsAlone 固定住 SaveFindings 的核心约定：
+// 它只碰 findings 一列。写成 SaveRun 那样的整行 upsert 时，Web 侧一次撤回
+// 就会用读旧了的快照覆盖掉命令行正在推进的 messages。
+func TestSaveFindingsLeavesOtherColumnsAlone(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "messages status and snapshot are untouched"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			run := Run{
+				ID: "r1", RepoPath: "/repo#main", Status: StatusInProgress,
+				Snapshot: []gitdiff.Change{{Status: "M", Path: "a.go", Patch: "p1"}},
+				Messages: []schema.Message{{Role: schema.RoleSystem, Content: "sys"}},
+				Findings: []review.Finding{{ID: "f1", File: "a.go"}},
+				Summary:  "original summary",
+			}
+			if err := s.SaveRun(ctx, run); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+
+			if err := s.SaveFindings(ctx, "r1", []review.Finding{
+				{ID: "f1", File: "a.go", Status: review.StatusWithdrawn},
+			}); err != nil {
+				t.Fatalf("SaveFindings: %v", err)
+			}
+
+			got, err := s.LoadRun(ctx, "r1")
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got.Status != StatusInProgress {
+				t.Errorf("Status = %q, want it untouched (%q)", got.Status, StatusInProgress)
+			}
+			if len(got.Messages) != 1 || got.Messages[0].Content != "sys" {
+				t.Errorf("Messages = %+v, want them untouched", got.Messages)
+			}
+			if !reflect.DeepEqual(got.Snapshot, run.Snapshot) {
+				t.Errorf("Snapshot = %+v, want it untouched", got.Snapshot)
+			}
+			if got.Summary != "original summary" {
+				t.Errorf("Summary = %q, want it untouched", got.Summary)
+			}
+			if got.Findings[0].Status != review.StatusWithdrawn {
+				t.Errorf("Findings[0].Status = %q, want the update to have landed", got.Findings[0].Status)
+			}
+		})
+	}
+}
+
+func TestSaveFindingsRejectsUnknownRun(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		// 静默成功会让调用方以为撤回已经落盘，而实际上什么都没发生。
+		{name: "a missing run is an error not a silent no-op", id: "does-not-exist"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			err := s.SaveFindings(context.Background(), tt.id, []review.Finding{{ID: "f1"}})
+			if err == nil {
+				t.Fatal("SaveFindings() error = nil, want an error about the run not existing")
+			}
+			if !strings.Contains(err.Error(), "does not exist") {
+				t.Errorf("error = %v, want it to say the run does not exist", err)
+			}
+		})
+	}
+}
+
+func TestParentRunIDRoundTrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		parent string
+	}{
+		{name: "a re-review links back to its baseline", parent: "run-parent"},
+		{name: "a first review has no parent", parent: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			run := Run{ID: "r1", RepoPath: "/repo#main", Status: StatusCompleted, ParentRunID: tt.parent}
+			if err := s.SaveRun(ctx, run); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+			got, err := s.LoadRun(ctx, "r1")
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got.ParentRunID != tt.parent {
+				t.Errorf("ParentRunID = %q, want %q", got.ParentRunID, tt.parent)
+			}
+		})
+	}
+}

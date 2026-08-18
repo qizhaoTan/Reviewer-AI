@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -48,9 +49,55 @@ func (f fakeSource) LoadRun(_ context.Context, id string) (*store.Run, error) {
 
 func get(t *testing.T, source RunSource, target string) *httptest.ResponseRecorder {
 	t.Helper()
+	return serve(t, source, nil, httptest.NewRequest(http.MethodGet, target, nil))
+}
+
+// serve 把一个请求打进装配好的 handler。reviewer 为 nil 表示只读部署。
+func serve(t *testing.T, source RunSource, reviewer Reviewer, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	NewServer(source, ":0").Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	NewServer(source, reviewer, ":0").Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// postForm 构造一个表单 POST 请求。
+func postForm(target string, values url.Values) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+// fakeReviewer 是 Reviewer 的测试替身：记录收到的参数，按预置结果作答。
+type fakeReviewer struct {
+	replyErr    error
+	rereviewErr error
+	// newRunID 是 Rereview 成功时返回的新记录 ID。
+	newRunID string
+
+	// 收到的参数，供断言。
+	gotRunID     string
+	gotFindingID string
+	gotReply     string
+	replyCalls   int
+	rereviewCall int
+}
+
+func (f *fakeReviewer) Reply(_ context.Context, runID, findingID, userReply string) (*store.Run, error) {
+	f.replyCalls++
+	f.gotRunID, f.gotFindingID, f.gotReply = runID, findingID, userReply
+	if f.replyErr != nil {
+		return nil, f.replyErr
+	}
+	return &store.Run{ID: runID}, nil
+}
+
+func (f *fakeReviewer) Rereview(_ context.Context, runID string) (*store.Run, error) {
+	f.rereviewCall++
+	f.gotRunID = runID
+	if f.rereviewErr != nil {
+		return nil, f.rereviewErr
+	}
+	return &store.Run{ID: f.newRunID}, nil
 }
 
 func TestHandleIndex(t *testing.T) {
@@ -515,6 +562,297 @@ func TestLineRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := lineRange(tt.start, tt.end); got != tt.want {
 				t.Errorf("lineRange(%d, %d) = %q, want %q", tt.start, tt.end, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleReply(t *testing.T) {
+	run := store.Run{
+		ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted, Critiqued: true,
+		Findings: []review.Finding{{ID: "f1", File: "a.go", Severity: review.SeverityError, Summary: "boom", Kept: true}},
+	}
+	source := fakeSource{runs: []store.Run{run}}
+
+	tests := []struct {
+		name     string
+		form     url.Values
+		replyErr error
+		wantCode int
+		// wantLocation 非空时断言重定向目标包含这些片段。
+		wantLocation []string
+		wantCalls    int
+	}{
+		{
+			name:         "a valid reply reaches the reviewer and redirects back",
+			form:         url.Values{"run": {"run-1"}, "finding": {"f1"}, "reply": {"我认为不成立"}},
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"/run?", "id=run-1", "notice="},
+			wantCalls:    1,
+		},
+		{
+			// 失败要带着原因回到详情页，而不是甩一个白屏 500——用户刚写完
+			// 一段话，至少得知道它为什么没被接受。
+			name:         "a reviewer failure comes back as a message not a 500",
+			form:         url.Values{"run": {"run-1"}, "finding": {"f1"}, "reply": {"异议"}},
+			replyErr:     errors.New("upstream 503"),
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"error=", "upstream+503"},
+			wantCalls:    1,
+		},
+		{
+			// 空回复不该浪费一次模型调用。
+			name:         "an empty reply never reaches the reviewer",
+			form:         url.Values{"run": {"run-1"}, "finding": {"f1"}, "reply": {"   "}},
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"error="},
+			wantCalls:    0,
+		},
+		{
+			name:      "a missing run id is a bad request",
+			form:      url.Values{"finding": {"f1"}, "reply": {"异议"}},
+			wantCode:  http.StatusBadRequest,
+			wantCalls: 0,
+		},
+		{
+			name:      "a missing finding id is a bad request",
+			form:      url.Values{"run": {"run-1"}, "reply": {"异议"}},
+			wantCode:  http.StatusBadRequest,
+			wantCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reviewer := &fakeReviewer{replyErr: tt.replyErr}
+			rec := serve(t, source, reviewer, postForm("/reply", tt.form))
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantCode, rec.Body.String())
+			}
+			if reviewer.replyCalls != tt.wantCalls {
+				t.Errorf("Reply called %d times, want %d", reviewer.replyCalls, tt.wantCalls)
+			}
+			for _, want := range tt.wantLocation {
+				if got := rec.Header().Get("Location"); !strings.Contains(got, want) {
+					t.Errorf("Location %q does not contain %q", got, want)
+				}
+			}
+			if tt.wantCalls > 0 && reviewer.gotFindingID != "f1" {
+				t.Errorf("finding id passed through = %q, want %q", reviewer.gotFindingID, "f1")
+			}
+		})
+	}
+}
+
+// TestHandleReplyRejectsGet 固定住"这些端点只接受 POST"。
+// GET 能触发的话，一个预取链接的浏览器插件就能自作主张地花掉几次模型调用。
+func TestHandleReplyRejectsGet(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "reply", target: "/reply?run=run-1&finding=f1&reply=x"},
+		{name: "rereview", target: "/rereview?run=run-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reviewer := &fakeReviewer{}
+			rec := serve(t, fakeSource{}, reviewer, httptest.NewRequest(http.MethodGet, tt.target, nil))
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+			}
+			if reviewer.replyCalls+reviewer.rereviewCall != 0 {
+				t.Error("a GET reached the reviewer; these endpoints must be POST-only")
+			}
+		})
+	}
+}
+
+// TestInteractiveEndpointsWithoutReviewer 固定住只读部署的行为：交互端点
+// 返回 503，而浏览页面照常可用——配置里少个 API key 不该让整个查看服务瘫掉。
+func TestInteractiveEndpointsWithoutReviewer(t *testing.T) {
+	run := store.Run{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}
+	source := fakeSource{runs: []store.Run{run}}
+
+	tests := []struct {
+		name     string
+		target   string
+		form     url.Values
+		wantCode int
+	}{
+		{name: "reply is unavailable", target: "/reply", form: url.Values{"run": {"run-1"}, "finding": {"f1"}, "reply": {"x"}}, wantCode: http.StatusServiceUnavailable},
+		{name: "rereview is unavailable", target: "/rereview", form: url.Values{"run": {"run-1"}}, wantCode: http.StatusServiceUnavailable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := serve(t, source, nil, postForm(tt.target, tt.form))
+			if rec.Code != tt.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantCode)
+			}
+		})
+	}
+
+	t.Run("the detail page still renders and hides the forms", func(t *testing.T) {
+		rec := get(t, source, "/run?id=run-1")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), `action="/reply"`) {
+			t.Error("the reply form was rendered without a reviewer; clicking it would always fail")
+		}
+		if strings.Contains(rec.Body.String(), `action="/rereview"`) {
+			t.Error("the rereview button was rendered without a reviewer")
+		}
+	})
+}
+
+func TestHandleRereview(t *testing.T) {
+	run := store.Run{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}
+	source := fakeSource{runs: []store.Run{run}}
+
+	tests := []struct {
+		name         string
+		rereviewErr  error
+		newRunID     string
+		wantLocation []string
+	}{
+		{
+			// 成功后要跳到**新**记录：用户要看的是重审之后的结果。
+			name:         "success redirects to the newly created run",
+			newRunID:     "run-2",
+			wantLocation: []string{"id=run-2", "notice="},
+		},
+		{
+			// 失败留在原记录并说明原因。
+			name:         "failure redirects back to the original run with the reason",
+			rereviewErr:  errors.New("nothing is staged"),
+			wantLocation: []string{"id=run-1", "error=", "nothing+is+staged"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reviewer := &fakeReviewer{rereviewErr: tt.rereviewErr, newRunID: tt.newRunID}
+			rec := serve(t, source, reviewer, postForm("/rereview", url.Values{"run": {"run-1"}}))
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusSeeOther, rec.Body.String())
+			}
+			if reviewer.rereviewCall != 1 {
+				t.Errorf("Rereview called %d times, want 1", reviewer.rereviewCall)
+			}
+			for _, want := range tt.wantLocation {
+				if got := rec.Header().Get("Location"); !strings.Contains(got, want) {
+					t.Errorf("Location %q does not contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunPageRendersInteractiveElements(t *testing.T) {
+	withdrawn := review.Finding{
+		ID: "f2", File: "b.go", Severity: review.SeverityWarning, Summary: "作者已说服撤回",
+		Kept: true, Status: review.StatusWithdrawn,
+		Discussion: []schema.Message{
+			{Role: schema.RoleUser, Content: "调用方已经处理了"},
+			{Role: schema.RoleAssistant, Content: "确实如此，撤回"},
+		},
+	}
+	run := store.Run{
+		ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted, Critiqued: true,
+		ParentRunID: "run-0",
+		Findings: []review.Finding{
+			{ID: "f1", File: "a.go", Severity: review.SeverityError, Summary: "还站得住", Kept: true},
+			withdrawn,
+			{ID: "f3", File: "c.go", Severity: review.SeverityInfo, Summary: "复核砍掉的", Kept: false, CritiqueReason: "过度解读"},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		wantContains []string
+		wantExcludes []string
+		// wantCount 断言片段出现的确切次数。
+		substr    string
+		wantCount int
+	}{
+		{
+			name: "withdrawn finding is marked and its discussion is shown",
+			wantContains: []string{
+				"已撤回", "finding withdrawn",
+				"调用方已经处理了", "确实如此，撤回",
+				"讨论记录",
+			},
+		},
+		{
+			name:         "the parent run is linked so the re-review chain is navigable",
+			wantContains: []string{`href="/run?id=run-0"`},
+		},
+		{
+			// 回复框只给"未撤回且通过复核"的那一条：撤回过的再争论没意义，
+			// 复核砍掉的那组根本不该出现表单。
+			name:      "a reply form is rendered only for the one open kept finding",
+			substr:    `action="/reply"`,
+			wantCount: 1,
+		},
+		{
+			name:         "the rereview button is rendered",
+			wantContains: []string{`action="/rereview"`},
+		},
+	}
+
+	source := fakeSource{runs: []store.Run{run}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := serve(t, source, &fakeReviewer{}, httptest.NewRequest(http.MethodGet, "/run?id=run-1", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			body := rec.Body.String()
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(body, want) {
+					t.Errorf("body does not contain %q", want)
+				}
+			}
+			for _, unwanted := range tt.wantExcludes {
+				if strings.Contains(body, unwanted) {
+					t.Errorf("body unexpectedly contains %q", unwanted)
+				}
+			}
+			if tt.substr != "" {
+				if got := strings.Count(body, tt.substr); got != tt.wantCount {
+					t.Errorf("body contains %q %d times, want %d", tt.substr, got, tt.wantCount)
+				}
+			}
+		})
+	}
+}
+
+// TestReplyBannerIsEscaped 固定住提示语走的是 html/template 的自动转义。
+// notice/error 是从查询参数原样带回来的，任何人都能构造一个链接。
+func TestReplyBannerIsEscaped(t *testing.T) {
+	run := store.Run{ID: "run-1", RepoPath: "/repo#main", Status: store.StatusCompleted}
+	source := fakeSource{runs: []store.Run{run}}
+
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "notice", target: "/run?id=run-1&notice=%3Cscript%3Ealert(1)%3C/script%3E"},
+		{name: "error", target: "/run?id=run-1&error=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(t, source, tt.target)
+			body := rec.Body.String()
+			if strings.Contains(body, "<script>alert(1)</script>") || strings.Contains(body, "<img src=x onerror=") {
+				t.Error("query-parameter content reached the page unescaped")
 			}
 		})
 	}

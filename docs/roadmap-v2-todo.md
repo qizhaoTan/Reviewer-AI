@@ -98,16 +98,56 @@
 
 ## 阶段四：用户交互（reply / review）+ 增量重审
 
-- [ ] **4.1** 修改 `internal/store`：`FindingStatus`、`FindingRecord`（Finding + Status + Discussion）、`Run.ParentRunID`。
-- [ ] **4.2** 新建 `internal/review/incremental.go`：`DiffSnapshot(old, new []gitdiff.Change) (unchanged, changed []gitdiff.Change)`，纯逻辑函数。
-- [ ] **4.3** 新建 `internal/review/incremental_test.go`：表驱动覆盖文件新增/删除/修改/未变化/重命名等边界情况——这是本阶段最容易出 bug 的核心逻辑，优先把测试写扎实。
-- [ ] **4.4** 新建 `internal/tool/withdrawfinding.go`：`WithdrawFindingTool`。
-- [ ] **4.5** 新建 `internal/review/discuss.go`：reply 对话的独立 `Generate` 封装（聚焦单条 Finding 的上下文，不复用主审查的全量 prompt）。
-- [ ] **4.6** 修改 `internal/web`：加 `POST /run/{id}/finding/{findingID}/reply` handler + 页面上的回复输入框。
-- [ ] **4.7** 修改 `internal/web`：加 `POST /run/{id}/rereview` handler（第一版同步阻塞直到完成），触发增量重审流程并创建新 `Run`（`ParentRunID` 关联）。
-- [ ] **4.8** `go build ./... && go test ./... && gofmt -l . && go vet ./...` 全绿。
-- [ ] **4.9** 手工验证 reply：对一条 Finding 提交有说服力的回复，确认模型正确调用 `withdraw_finding`，Web 上状态变化正确。
-- [ ] **4.10** 手工验证 review：修复一个问题、重新 stage，触发 rereview，确认只有改动过的文件被重新送审，未改动文件的 Findings 原样保留。
+- [x] **4.1** `review.Finding` 加 `Status`（`open`/`withdrawn`）+ `Discussion []schema.Message`；新增 `Report.ActiveFindings()`。
+      **偏离原设计**：原计划在 `store` 里新建 `FindingRecord` 包装 `review.Finding`。改为直接扩展 `Finding`——
+      它已是全链路通用货币（`KeptFindings`/`Critique`/`Render`/`web` 都直接吃它），换类型要改四处，
+      且会让持久化包去定义业务模型的变体，依赖方向是反的。同时砍掉 `acknowledged`：
+      reply/rereview 两条流程都没有它的写入点，是个没人写也没人读的字段。
+      `Kept`（归复核）与 `Status`（归交互）保持两道独立闸门，合并会让"复核砍的"和"用户说服撤回的"再也分不开。
+      副作用：`Finding` 因含切片字段不再可比较，四处测试的 `!=` 改成 `reflect.DeepEqual`。
+- [x] **4.2** 新建 `internal/review/incremental.go`：`DiffSnapshot` + `CarryOverFindings`。
+      **偏离原设计**：返回三组而非两组，多出 `Vanished`——`Unchanged`/`Changed` 是对 new 的划分，
+      而"上次审过、这次不在暂存区"的文件在 new 里没有对应项，塞进哪组都是错的，
+      两组签名下它会被静默丢弃、旧意见跟着复用，用户看到针对非暂存文件的意见无从下手。
+      判据是 patch 逐字节相等（不比 status）：同一份 patch 意味着模型看到完全相同的输入。
+      查证确认 `LoadStaged` 带 `--no-renames`，所以 rename 永远拆成 D+A，不会出现 status R。
+- [x] **4.3** 新建 `internal/review/incremental_test.go`：11 个 `DiffSnapshot` 用例（首次审查/全同/单文件改动/
+      新增/消失/staged deletion/rename 拆分/全部 unstage/status 变但 patch 未变/双空/四类混合）
+      + 顺序与内容保持 + 6 个 `CarryOverFindings` 用例。含一条"Unchanged+Changed 必须构成 new 的划分"的不重不漏断言。
+      三轮变异测试（去掉 patch 比较 / 带过撤回意见 / 不检测消失文件）分别有 4、1、3 个用例失败。
+- [x] **4.4** 新建 `internal/tool/withdrawfinding.go`：`WithdrawFindingTool` + `Result.Withdrawal`。
+      工具**不收** finding id（一次对话只围绕一条意见，让模型填只多一种填错的可能，而填错＝撤销了另一条意见）。
+      描述里明确"坚持时不要调用本工具"，并有测试固定这句措辞。
+- [x] **4.5** 新建 `internal/engine/discuss.go`：`Reply` 对话循环。
+      **与复核循环的关键区别**：复核必须调 `submit_verdict` 收尾，而 reply 的两种结局不对称——
+      撤回要调工具，坚持只需正常说话，所以终止条件是"这一轮没有工具调用"。
+      把坚持设成零成本，是为了不给模型"顺手把事办完"的捷径。
+      system prompt 方向与复核相反（复核压"附和初审"，这里压"附和用户"），
+      用户输入按不可信数据包装成"作者的异议"并声明它不是指令。
+      两轮变异测试（无工具调用改 continue / 撤回不上报）分别有 3、2 个用例失败。
+- [x] **4.6** 修改 `internal/web`：新增 `Reviewer` 接口（`Reply`/`Rereview`），由 cmd 注入 `engine.Interactive`，
+      web 仍不 import engine。`POST /reply`、`POST /rereview` 两个端点 + `beginAction` 共用前置校验。
+      详情页：撤回标记与删除线、讨论记录（默认展开）、逐条回复框、结果提示条、上一轮记录链接。
+      回复框只给"未撤回且通过复核"的意见（Dropped 组传 `Interactive=false` 复用同一份子模板）。
+      用 303 重定向而不是原地渲染：POST 后停在原地，刷新就会重复提交（重审是要花钱的）。
+- [x] **4.7** 新建 `internal/engine/interactive.go`：`Interactive` 实现两个动作；
+      `store` 加 `Run.ParentRunID`（+ 建表列、旧库迁移、`SaveRun`/`scanRun`）与 `SaveFindings`。
+      `SaveFindings` 只写 findings 一列而不复用 `SaveRun`：Web 侧那份 Run 是读出来的快照，
+      整行 upsert 会用它盖掉命令行正在推进的 messages。
+      重审结果写成**新** Run（`ParentRunID` 指回基线）而不是原地更新：旧记录是那次审查的事实存档。
+      快照存**完整**当前暂存区（只存改动子集会让未变化文件下次被误判成新增）；
+      合并后 `renumber` 重排 ID（两个来源各自从 f1 编号，不重排必然撞车，而 reply 靠 ID 定位意见）。
+      三轮变异测试（不重排 ID / 只存部分快照 / 带过全部旧意见）均被对应用例捕获。
+- [x] **4.8** `go build ./... && go test ./... -race && gofmt -l . && go vet ./...` 全绿。
+- [x] **4.9/4.10** 端到端验证（对真实 `~/.reviewer/runs.db`，动库前已备份）：
+      旧库缺 `parent_run_id` 列自动迁移成功、真实数据一字未改；
+      4 条意见 / 2 条 kept 的记录正好渲染 2 个回复框 + 1 个重审按钮；
+      `GET /reply` → 405、缺 run/finding → 400、空回复 → 303 带错误提示；
+      重审在空暂存区下正确报 "nothing is staged in /Users/tan/Reviewer-AI"；
+      提示条正常渲染且 `<script>` 被转义。
+      - [ ] **待 Tan 用真实模型验收**：有说服力的 reply 能否让模型调用 `withdraw_finding`、
+            无理取闹的 reply 会不会让它照样让步（这是 sycophancy 措辞是否起效的真正考验）；
+            改一个文件后重审，未改动文件的意见是否原样保留、改动文件是否真的重审
 - [ ] ⏸ **停下来，等待确认**：阶段四讲解 + 确认理解后再继续。
 
 ## 阶段五：子 Agent 并发审查

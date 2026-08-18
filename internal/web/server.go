@@ -12,6 +12,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,19 +32,39 @@ type RunSource interface {
 	LoadRun(ctx context.Context, id string) (*store.Run, error)
 }
 
+// Reviewer 是需要调用大模型的那部分交互能力，由 cmd 入口注入 engine 的实现。
+//
+// 单开一个接口而不是让 web 直接 import engine：web 的职责是"把请求翻译成一次
+// 动作、把结果渲染成 HTML"，至于这次动作要跑几轮模型、用哪些工具、怎么落盘，
+// 是 engine 的事。接口只有两个方法，web 也就只能做这两件事。
+//
+// 为 nil 时（比如以后加一个纯只读模式）两个交互端点返回 503，页面照常可读——
+// 查看历史记录不该因为模型没配好就整个用不了。
+type Reviewer interface {
+	// Reply 就用户对某条意见的异议跑一次对话，落盘后返回更新过的记录。
+	// findingID 不存在时返回错误。
+	Reply(ctx context.Context, runID, findingID, userReply string) (*store.Run, error)
+
+	// Rereview 基于 runID 这次审查的快照做一次增量重审，返回新建的运行记录。
+	// 未变化文件的意见原样保留，只有真正改动过的文件会重新送审。
+	Rereview(ctx context.Context, runID string) (*store.Run, error)
+}
+
 // defaultListLimit 是列表页展示的最大记录数。够翻查最近的调试记录，
 // 又不至于让一个跑了几百次的库把整页撑爆。
 const defaultListLimit = 200
 
 // Server 是历史记录查看服务。
 type Server struct {
-	source RunSource
-	addr   string
+	source   RunSource
+	reviewer Reviewer
+	addr     string
 }
 
-// NewServer 装配 Web 服务。addr 形如 ":8090"。
-func NewServer(source RunSource, addr string) *Server {
-	return &Server{source: source, addr: addr}
+// NewServer 装配 Web 服务。addr 形如 ":8090"；reviewer 可以为 nil，
+// 此时只提供只读浏览。
+func NewServer(source RunSource, reviewer Reviewer, addr string) *Server {
+	return &Server{source: source, reviewer: reviewer, addr: addr}
 }
 
 // Handler 返回装配好路由的 http.Handler。单独暴露出来是为了测试能直接
@@ -52,6 +73,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/run", s.handleRun)
+	mux.HandleFunc("/reply", s.handleReply)
+	mux.HandleFunc("/rereview", s.handleRereview)
 	return mux
 }
 
@@ -147,8 +170,20 @@ type runPage struct {
 	Branch   string
 	// Kept / Dropped 把 Findings 按复核结论分成两组，让"复核到底过滤掉了
 	// 什么"在页面上一眼可见——这正是这个 Web 服务存在的主要理由。
+	//
+	// 被用户说服撤回的意见仍然留在 Kept 里（它确实通过了复核），只是在模板里
+	// 打上撤回标记并置灰。不把它们挪进 Dropped：那一组的含义是"复核砍掉的"，
+	// 混进来会让"复核到底砍了多少"这个数字失真。
 	Kept    []review.Finding
 	Dropped []review.Finding
+
+	// Interactive 表示这次部署是否接了模型，决定页面上要不要渲染回复框和
+	// 重审按钮。渲染一个点了必然报错的按钮，比不渲染更糟。
+	Interactive bool
+
+	// Notice / Error 是上一次操作的结果提示，通过重定向后的查询参数带回来。
+	Notice string
+	Error  string
 }
 
 // handleRun 渲染单次运行的详情页。
@@ -170,7 +205,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	repoPath, branch := splitRunKey(run.RepoPath)
-	page := runPage{Run: *run, RepoPath: repoPath, Branch: branch}
+	page := runPage{
+		Run: *run, RepoPath: repoPath, Branch: branch,
+		Interactive: s.reviewer != nil,
+		Notice:      r.URL.Query().Get("notice"),
+		Error:       r.URL.Query().Get("error"),
+	}
 	for _, f := range run.Findings {
 		// 与 countFindings 同一套口径：复核没跑完就全部按"保留"展示。
 		if !run.Critiqued || f.Kept {
@@ -183,6 +223,101 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err := runTmpl.Execute(w, page); err != nil {
 		http.Error(w, "渲染详情页失败: "+err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// handleReply 处理"对某条意见提出异议"的表单提交。
+//
+// 同步阻塞直到模型给出结论——一次 reply 是一轮小对话，通常几秒到几十秒，
+// 为它引入任务队列和轮询是不划算的复杂度。慢的话浏览器转圈，能接受。
+func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
+	runID, findingID, ok := s.beginAction(w, r, "finding")
+	if !ok {
+		return
+	}
+
+	reply := strings.TrimSpace(r.FormValue("reply"))
+	if reply == "" {
+		redirectToRun(w, r, runID, "", "回复内容为空，没有可讨论的内容")
+		return
+	}
+
+	if _, err := s.reviewer.Reply(r.Context(), runID, findingID, reply); err != nil {
+		// 失败原样回到详情页并把原因显示出来，而不是甩一个 500 白屏——
+		// 用户刚写完一段话，至少得知道它为什么没被接受。
+		redirectToRun(w, r, runID, "", "回复失败: "+err.Error())
+		return
+	}
+	redirectToRun(w, r, runID, "已提交回复，模型的结论见该条意见下方的讨论记录", "")
+}
+
+// handleRereview 处理"我已修复，重新审查"的表单提交。
+//
+// 同样同步阻塞。这个可能要跑几分钟（改动过的文件要重走完整的初审+复核），
+// 页面会一直转圈——第一版接受这个代价，换掉它需要的是一整套异步任务状态，
+// 而那笔投入应该等到确实觉得慢了再花。
+func (s *Server) handleRereview(w http.ResponseWriter, r *http.Request) {
+	runID, _, ok := s.beginAction(w, r, "")
+	if !ok {
+		return
+	}
+
+	newRun, err := s.reviewer.Rereview(r.Context(), runID)
+	if err != nil {
+		redirectToRun(w, r, runID, "", "重新审查失败: "+err.Error())
+		return
+	}
+	// 跳到新建的那条记录：用户要看的是重审之后的结果，不是他刚才离开的旧记录。
+	redirectToRun(w, r, newRun.ID, "增量重审完成，未改动文件的意见已原样保留", "")
+}
+
+// beginAction 是两个 POST 端点共用的前置检查：方法、reviewer 是否就绪、
+// 必填参数。ok 为 false 时响应已经写好，调用方直接返回即可。
+//
+// findingParam 为空表示这个端点不需要 finding id。
+func (s *Server) beginAction(w http.ResponseWriter, r *http.Request, findingParam string) (runID, findingID string, ok bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "该端点只接受 POST", http.StatusMethodNotAllowed)
+		return "", "", false
+	}
+	if s.reviewer == nil {
+		http.Error(w, "本次启动未接入模型，交互功能不可用", http.StatusServiceUnavailable)
+		return "", "", false
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "解析表单失败: "+err.Error(), http.StatusBadRequest)
+		return "", "", false
+	}
+
+	runID = r.FormValue("run")
+	if runID == "" {
+		http.Error(w, "缺少运行记录 id", http.StatusBadRequest)
+		return "", "", false
+	}
+	if findingParam != "" {
+		findingID = r.FormValue(findingParam)
+		if findingID == "" {
+			http.Error(w, "缺少意见 id", http.StatusBadRequest)
+			return "", "", false
+		}
+	}
+	return runID, findingID, true
+}
+
+// redirectToRun 把操作结果作为查询参数带回详情页。
+//
+// 用 303 重定向而不是直接渲染：POST 之后停在原地，用户一刷新就会重复提交一次
+// 回复（或者再触发一次重审），而重审是要花钱的。重定向后地址栏是 GET，刷新无害。
+func redirectToRun(w http.ResponseWriter, r *http.Request, runID, notice, errMsg string) {
+	target := url.URL{Path: "/run"}
+	q := url.Values{"id": {runID}}
+	if notice != "" {
+		q.Set("notice", notice)
+	}
+	if errMsg != "" {
+		q.Set("error", errMsg)
+	}
+	target.RawQuery = q.Encode()
+	http.Redirect(w, r, target.String(), http.StatusSeeOther)
 }
 
 // 模板：服务端渲染，零前端依赖。html/template 自动转义，杜绝注入。

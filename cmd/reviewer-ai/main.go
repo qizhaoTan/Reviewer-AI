@@ -39,6 +39,7 @@ func runWeb(args []string) {
 	fs := flag.NewFlagSet("web", flag.ExitOnError)
 	addr := fs.String("addr", ":8090", "address for the web viewer to listen on")
 	noOpen := fs.Bool("no-open", false, "do not open the viewer in a browser on startup")
+	configPath := fs.String("config", "", "path to config.json (default: ~/.reviewer/config.json or $REVIEWER_AI_CONFIG)")
 	if err := fs.Parse(args); err != nil {
 		fail("parse web flags: %v", err)
 	}
@@ -48,6 +49,17 @@ func runWeb(args []string) {
 		fail("open run store: %v", err)
 	}
 	defer db.Close()
+
+	// 交互功能（reply / 增量重审）要调模型，所以需要完整的配置。配置不可用时
+	// 只是把 reviewer 留成 nil——页面照常能看历史记录，只是没有回复框和重审
+	// 按钮。为了配置文件里少个 API key 就让整个查看服务起不来，是不划算的。
+	var reviewer web.Reviewer
+	if inter, err := buildInteractive(*configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "reviewer-ai: 交互功能不可用（%v），仅提供只读浏览\n", err)
+	} else {
+		inter.Deps.Store = db
+		reviewer = inter
+	}
 
 	url := "http://localhost" + *addr
 	fmt.Fprintf(os.Stderr, "reviewer-ai: web viewer listening on %s\n", url)
@@ -66,7 +78,7 @@ func runWeb(args []string) {
 		}()
 	}
 
-	if err := web.NewServer(db, *addr).ListenAndServe(); err != nil {
+	if err := web.NewServer(db, reviewer, *addr).ListenAndServe(); err != nil {
 		fail("web server: %v", err)
 	}
 }
@@ -134,33 +146,17 @@ func runReview(args []string) {
 		fail("resolve model config: %v", err)
 	}
 
-	llm, err := provider.New(modelCfg.ToProviderConfig())
-	if err != nil {
-		fail("create provider: %v", err)
-	}
-
 	db, err := store.New("")
 	if err != nil {
 		fail("open run store: %v", err)
 	}
 	defer db.Close()
 
-	// 只读工具两个阶段共用；收尾工具各不相同——初审用 submit_review 提交意见，
-	// 复核用 submit_verdict 给单条意见下裁决。
-	readOnlyTools := []tool.ITool{
-		tool.ReadFileTool{},
-		tool.GlobTool{},
-		tool.GrepTool{},
+	deps, err := buildDeps(cfgFile, modelCfg, changes)
+	if err != nil {
+		fail("%v", err)
 	}
-	deps := engine.Deps{
-		LLM:                 llm,
-		Store:               db,
-		Tools:               append(append([]tool.ITool{}, readOnlyTools...), tool.SubmitReviewTool{Changes: changes}),
-		CritiqueTools:       append(append([]tool.ITool{}, readOnlyTools...), tool.CritiqueVerdictTool{}),
-		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
-		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
-		LanguagePrompt:      cfgFile.LanguagePromptOrDefault(),
-	}
+	deps.Store = db
 
 	run, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())
 	if err != nil {
@@ -173,4 +169,69 @@ func runReview(args []string) {
 func fail(format string, args ...any) {
 	log.Error(fmt.Sprintf(format, args...))
 	os.Exit(1)
+}
+
+// readOnlyTools 是三个阶段（初审 / 复核 / reply）共用的只读工具。
+// 每次都新建一份切片而不是共享一个包级变量：调用方会往返回值上 append
+// 各自的收尾工具，共享底层数组会让两次 append 互相覆盖。
+func readOnlyTools() []tool.ITool {
+	return []tool.ITool{
+		tool.ReadFileTool{},
+		tool.GlobTool{},
+		tool.GrepTool{},
+	}
+}
+
+// buildDeps 组装跑一次审查所需的依赖。Store 由调用方填——两条入口
+// （命令行审查、Web 交互）各自管理数据库的生命周期。
+//
+// 收尾工具三个阶段各不相同：初审用 submit_review 提交意见，复核用
+// submit_verdict 给单条意见下裁决，reply 用 withdraw_finding 撤回。
+func buildDeps(cfgFile *config.File, modelCfg config.ModelConfig, changes []gitdiff.Change) (engine.Deps, error) {
+	llm, err := provider.New(modelCfg.ToProviderConfig())
+	if err != nil {
+		return engine.Deps{}, fmt.Errorf("create provider: %w", err)
+	}
+	return engine.Deps{
+		LLM:                 llm,
+		Tools:               append(readOnlyTools(), tool.SubmitReviewTool{Changes: changes}),
+		CritiqueTools:       append(readOnlyTools(), tool.CritiqueVerdictTool{}),
+		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
+		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
+		LanguagePrompt:      cfgFile.LanguagePromptOrDefault(),
+	}, nil
+}
+
+// buildInteractive 为 Web 侧装配交互能力。返回的 Interactive 还缺 Deps.Store，
+// 由调用方填上自己打开的那个数据库。
+//
+// Deps.Tools 这里留着 submit_review 但 Changes 为空：增量重审时 engine.Run
+// 会用到它，而那时真正的 changes 由 Rereview 现场采集——工具实例上的 Changes
+// 只用于 anchor 反推行号，留空时意见降级成文件级，不会出错。
+func buildInteractive(configPath string) (*engine.Interactive, error) {
+	path := configPath
+	if path == "" {
+		var err error
+		path, err = config.DefaultPath()
+		if err != nil {
+			return nil, fmt.Errorf("resolve default config path: %w", err)
+		}
+	}
+	cfgFile, err := config.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	modelCfg, err := cfgFile.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("resolve model config: %w", err)
+	}
+	deps, err := buildDeps(cfgFile, modelCfg, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &engine.Interactive{
+		Deps:       deps,
+		ReplyTools: append(readOnlyTools(), tool.WithdrawFindingTool{}),
+		Timeout:    modelCfg.Timeout(),
+	}, nil
 }

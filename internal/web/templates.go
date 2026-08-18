@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 )
 
 // tmplFuncs 是两个模板共用的辅助函数。放在模板里做的都是纯展示逻辑
@@ -33,6 +35,21 @@ var tmplFuncs = template.FuncMap{
 	// peek 取正文的一小段作为折叠状态下的预览，让人不必挨个展开就能认出
 	// 哪条消息是自己要找的。换行折成空格，保证摘要行不被撑成多行。
 	"peek": func(s string) string { return truncateRunes(strings.TrimSpace(s), peekMaxRunes) },
+	// findingGroup 把子模板需要的三样东西打包成一个值，见 findingGroupData。
+	"findingGroup": func(runID string, interactive bool, findings []review.Finding) findingGroupData {
+		return findingGroupData{RunID: runID, Interactive: interactive, Findings: findings}
+	},
+}
+
+// findingGroupData 是 "findings" 子模板的入参。
+//
+// 用一个结构体而不是直接传 []review.Finding：子模板要渲染回复表单，就需要
+// 知道运行 ID（表单要带上），也需要知道这一组该不该出现表单（被复核砍掉的
+// 那组不该）。Go 模板里没法从 range 内部回头拿外层数据，只能一起传进来。
+type findingGroupData struct {
+	RunID       string
+	Interactive bool
+	Findings    []review.Finding
 }
 
 // peekMaxRunes 是折叠消息预览的最大长度（rune 数）。
@@ -151,13 +168,15 @@ const indexHTML = `<!DOCTYPE html>
 // runHTML 详情页。findings 块被两组意见（保留 / 丢弃）复用，所以抽成
 // 一个 define；两组的差异只有标题和是否显示复核理由。
 const runHTML = `{{define "findings"}}
-  {{if .}}
-    {{range .}}
-      <div class="finding">
+  {{$runID := .RunID}}{{$interactive := .Interactive}}
+  {{if .Findings}}
+    {{range .Findings}}
+      <div class="finding{{if .Status.IsWithdrawn}} withdrawn{{end}}">
         <div class="fhead">
           <span class="badge {{severityClass .Severity}}">{{upper .Severity}}</span>
           <span class="floc mono">{{.File}}{{lineRange .StartLine .EndLine}}</span>
           <span class="fid">{{.ID}}</span>
+          {{if .Status.IsWithdrawn}}<span class="badge wd">已撤回</span>{{end}}
           {{if not .StartLine}}<span class="fnote">未定位到行号，按文件级意见处理</span>{{end}}
         </div>
         <div class="fsummary">{{.Summary}}</div>
@@ -179,6 +198,34 @@ const runHTML = `{{define "findings"}}
               {{end}}
             </div>
           </details>
+        {{end}}
+
+        {{/* 讨论记录默认展开：用户提过异议的意见，那段往复正是他下次回来
+             要看的东西，藏起来等于白讨论一场。 */}}
+        {{if .Discussion}}
+          <details class="fdiscuss" open>
+            <summary>讨论记录（{{len .Discussion}} 条）</summary>
+            <div class="dbody">
+              {{range .Discussion}}
+                <div class="dmsg">
+                  <span class="role role-{{.Role}}">{{.Role}}</span>
+                  {{range .ToolCalls}}<span class="tag tool">{{.Name}}</span>{{end}}
+                  {{if .Content}}<pre>{{.Content}}</pre>{{end}}
+                </div>
+              {{end}}
+            </div>
+          </details>
+        {{end}}
+
+        {{/* 回复框只给还没撤回的意见：已经撤回的再争论没有意义。
+             Dropped 组传进来的 Interactive 是 false，所以那一组不渲染。 */}}
+        {{if and $interactive (not .Status.IsWithdrawn)}}
+          <form class="freply" method="post" action="/reply">
+            <input type="hidden" name="run" value="{{$runID}}">
+            <input type="hidden" name="finding" value="{{.ID}}">
+            <textarea name="reply" rows="2" placeholder="不同意这条意见？说明理由，模型会去核对代码后决定是否撤回。"></textarea>
+            <button type="submit">提交回复</button>
+          </form>
         {{end}}
       </div>
     {{end}}
@@ -210,6 +257,33 @@ const runHTML = `{{define "findings"}}
   .fanchor { background: #f2f6ff; }
   .flabel { font-size: 12px; color: #8a9099; margin-bottom: 4px; }
   .dropped .finding { opacity: .72; }
+  .finding.withdrawn { opacity: .6; }
+  .finding.withdrawn .fsummary { text-decoration: line-through; }
+  .badge.wd { background: #eef0f2; color: #646a73; }
+
+  .banner { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+  .banner.ok  { background: #e6f4ea; color: #137333; }
+  .banner.err { background: #fce8e6; color: #c5221f; }
+
+  .rereview { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px;
+              box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .rereview button { background: #3370ff; color: #fff; border: none; border-radius: 6px;
+                     padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  .rereview button:disabled { background: #b0b5bb; cursor: progress; }
+  .rereview .hint { color: #8a9099; font-size: 13px; }
+
+  .freply { margin-top: 10px; display: flex; gap: 8px; align-items: flex-start; }
+  .freply textarea { flex: 1; font-family: inherit; font-size: 13px; padding: 8px 10px;
+                     border: 1px solid #dee0e3; border-radius: 6px; resize: vertical; }
+  .freply button { background: #f2f6ff; color: #1a56c4; border: 1px solid #d0dcff;
+                   border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .freply button:hover { background: #e4ecff; }
+
+  .fdiscuss { margin-top: 10px; }
+  .fdiscuss > summary { cursor: pointer; font-size: 12px; color: #8a9099; padding: 2px 0; }
+  .fdiscuss .dbody { margin-top: 8px; }
+  .dmsg { background: #fafbfc; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .dmsg pre { margin-top: 6px; }
   .none { color: #b0b5bb; font-size: 14px; }
 
   /* 折叠区块：summary 里放 h2，去掉 h2 自带的外边距免得撑开三角标记。 */
@@ -261,8 +335,25 @@ const runHTML = `{{define "findings"}}
       <dt>更新时间</dt><dd class="mono">{{.Run.UpdatedAt.Format "2006-01-02 15:04:05"}}</dd>
       <dt>复核</dt><dd>{{if .Run.Critiqued}}已完成{{else}}未执行{{end}}</dd>
       <dt>改动文件</dt><dd>{{len .Run.Snapshot}} 个</dd>
+      {{if .Run.ParentRunID}}
+        <dt>上一轮</dt><dd><a href="/run?id={{.Run.ParentRunID}}">{{.Run.ParentRunID}} →</a></dd>
+      {{end}}
     </dl>
   </div>
+
+  {{if .Notice}}<div class="banner ok">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="banner err">{{.Error}}</div>{{end}}
+
+  {{if .Interactive}}
+    {{/* 重审按钮同步阻塞，可能跑几分钟，所以按钮上写清楚这一点，
+         免得用户以为页面卡死了反复点。 */}}
+    <form class="rereview" method="post" action="/rereview"
+          onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='正在重新审查，请勿关闭页面…'">
+      <input type="hidden" name="run" value="{{.Run.ID}}">
+      <button type="submit">我已按意见修改并重新 stage，增量重审</button>
+      <span class="hint">只有 patch 真正变过的文件会重新送审，未改动文件的意见原样保留。</span>
+    </form>
+  {{end}}
 
   {{if .Run.Summary}}
     <h2>整体评价</h2>
@@ -273,12 +364,12 @@ const runHTML = `{{define "findings"}}
        丢弃组和消息历史是排查时才翻的，默认折叠。用原生 <details>，零 JS。 */}}
   <details class="section" open>
     <summary><h2>保留的意见 <span class="count">（{{len .Kept}} 条{{if not .Run.Critiqued}} · 复核未执行，以下为初审原始结果{{end}}）</span></h2></summary>
-    <div class="card">{{template "findings" .Kept}}</div>
+    <div class="card">{{template "findings" findingGroup .Run.ID .Interactive .Kept}}</div>
   </details>
 
   <details class="section">
     <summary><h2>被复核丢弃的意见 <span class="count">（{{len .Dropped}} 条）</span></h2></summary>
-    <div class="card dropped">{{template "findings" .Dropped}}</div>
+    <div class="card dropped">{{template "findings" findingGroup .Run.ID false .Dropped}}</div>
   </details>
 
   <details class="section">

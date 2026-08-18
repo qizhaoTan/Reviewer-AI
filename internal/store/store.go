@@ -58,6 +58,13 @@ type Run struct {
 	// Kept 只是零值"这两种含义完全不同的 Kept=false。恢复时也靠它判断该从
 	// 主循环还是复核阶段接着跑。
 	Critiqued bool
+
+	// ParentRunID 指向本次增量重审所基于的上一条运行记录，把一次次重审串成
+	// 一条审查历史链。首次审查（没有基线）时为空。
+	//
+	// 存 ID 而不是把上一条整个嵌进来：链可以很长，嵌套存储会让每条记录都
+	// 带上它全部祖先的副本，一次重审就把数据库撑大一倍。
+	ParentRunID string
 }
 
 // Report 把 Run 上的三个字段还原成一份 review.Report。
@@ -146,7 +153,8 @@ func migrate(db *sql.DB) error {
 			messages      TEXT    NOT NULL,
 			findings      TEXT    NOT NULL DEFAULT '[]',
 			summary       TEXT    NOT NULL DEFAULT '',
-			critiqued     INTEGER NOT NULL DEFAULT 0
+			critiqued     INTEGER NOT NULL DEFAULT 0,
+			parent_run_id TEXT    NOT NULL DEFAULT ''
 		);
 	`); err != nil {
 		return err
@@ -160,6 +168,7 @@ func migrate(db *sql.DB) error {
 		{"findings", `ALTER TABLE runs ADD COLUMN findings TEXT NOT NULL DEFAULT '[]'`},
 		{"summary", `ALTER TABLE runs ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
 		{"critiqued", `ALTER TABLE runs ADD COLUMN critiqued INTEGER NOT NULL DEFAULT 0`},
+		{"parent_run_id", `ALTER TABLE runs ADD COLUMN parent_run_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		exists, err := columnExists(db, "runs", col.name)
 		if err != nil {
@@ -234,8 +243,8 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages, findings, summary, critiqued)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages, findings, summary, critiqued, parent_run_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			status        = excluded.status,
 			updated_at    = excluded.updated_at,
@@ -244,12 +253,50 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 			messages      = excluded.messages,
 			findings      = excluded.findings,
 			summary       = excluded.summary,
-			critiqued     = excluded.critiqued
+			critiqued     = excluded.critiqued,
+			parent_run_id = excluded.parent_run_id
 	`, run.ID, run.RepoPath, string(run.Status), createdAt.UnixNano(), now.UnixNano(),
 		string(snapshotJSON), snapshotHash, string(messagesJSON),
-		string(findingsJSON), run.Summary, run.Critiqued)
+		string(findingsJSON), run.Summary, run.Critiqued, run.ParentRunID)
 	if err != nil {
 		return fmt.Errorf("save run %s: %w", run.ID, err)
+	}
+	return nil
+}
+
+// SaveFindings 只更新一条运行记录的 findings 列，不碰 messages / status /
+// snapshot。
+//
+// 为什么不复用 SaveRun：reply 只改动一条意见的 Status 和 Discussion，而 SaveRun
+// 会把调用方手里那份 Run 的**每个**字段都写回去。Web 侧的 Run 是先 LoadRun 读出来
+// 的一份快照，如果此时命令行正在同一条记录上跑审查并推进 messages，SaveRun 就会
+// 拿这份读旧了的快照把新进展覆盖掉。只写一列把这个窗口缩到最小。
+//
+// 这不是完整的并发控制（两个 reply 同时改不同意见仍会互相覆盖），但对"本机单人
+// 使用"这个定位是够的：真正会撞车的是 Web 与 CLI 并行，而那正是这里挡住的。
+func (s *Store) SaveFindings(ctx context.Context, id string, findings []review.Finding) error {
+	if findings == nil {
+		findings = []review.Finding{}
+	}
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		return fmt.Errorf("marshal findings for run %s: %w", id, err)
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE runs SET findings = ?, updated_at = ? WHERE id = ?
+	`, string(findingsJSON), time.Now().UnixNano(), id)
+	if err != nil {
+		return fmt.Errorf("save findings for run %s: %w", id, err)
+	}
+	// 影响 0 行意味着这个 ID 根本不存在。静默成功会让调用方以为撤回已经
+	// 持久化，而实际上什么都没发生。
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("save findings for run %s: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("save findings: run %s does not exist", id)
 	}
 	return nil
 }
@@ -371,7 +418,7 @@ func (s *Store) queryRuns(ctx context.Context, where string, limit int, args ...
 // runColumns 是所有查询共用的列清单，顺序必须与 scanRun 的 Scan 参数一一对应。
 // 抽成常量是因为之前四处 SELECT 各写一遍，加一列就要改四处，漏改一处就是
 // "列数对不上"的运行期错误。
-const runColumns = `id, repo_path, status, created_at, updated_at, snapshot, messages, findings, summary, critiqued`
+const runColumns = `id, repo_path, status, created_at, updated_at, snapshot, messages, findings, summary, critiqued, parent_run_id`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -383,7 +430,7 @@ func scanRun(row rowScanner) (*Run, error) {
 	var createdAt, updatedAt int64
 	var snapshotJSON, messagesJSON, findingsJSON string
 	if err := row.Scan(&run.ID, &run.RepoPath, &status, &createdAt, &updatedAt,
-		&snapshotJSON, &messagesJSON, &findingsJSON, &run.Summary, &run.Critiqued); err != nil {
+		&snapshotJSON, &messagesJSON, &findingsJSON, &run.Summary, &run.Critiqued, &run.ParentRunID); err != nil {
 		return nil, err
 	}
 	run.Status = RunStatus(status)
