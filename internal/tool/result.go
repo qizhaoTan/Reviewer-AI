@@ -32,4 +32,12 @@ type Result struct {
 	// 其余工具留 nil。语义和取舍同 ReviewResult——复核循环靠它非 nil
 	// 判断这一条已经裁决完毕。
 	CritiqueVerdict *Verdict
+
+	// Withdrawal 是模型被用户说服后撤回一条意见的决定，只有 withdraw_finding
+	// 会填，其余工具留 nil。语义和取舍同上。
+	//
+	// 与前两个字段有一点不同：ReviewResult / CritiqueVerdict 是各自循环的
+	// **必经**终点，而 Withdrawal 只是 reply 对话两种结局中的一种——模型坚持
+	// 己见时它始终是 nil，那也是一次正常结束的对话。见 engine.Reply。
+	Withdrawal *Withdrawal
 }
