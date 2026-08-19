@@ -919,3 +919,97 @@ func TestDeleteRunLeavesOtherRunsIntact(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteAllRuns 覆盖清空：有记录时全删并报出条数、空库时返回 0 且不报错、
+// 清空后原有查询路径都读不到东西（而不是读到半截残留）。
+func TestDeleteAllRuns(t *testing.T) {
+	tests := []struct {
+		name      string
+		seed      []Run
+		wantCount int64
+	}{
+		{
+			name: "clears every run across repos and branches",
+			seed: []Run{
+				{ID: "r1", RepoPath: "/a#main", Status: StatusCompleted},
+				{ID: "r2", RepoPath: "/a#dev", Status: StatusFailed},
+				{ID: "r3", RepoPath: "/b#main", Status: StatusCompleted, ParentRunID: "r1"},
+			},
+			wantCount: 3,
+		},
+		{
+			name:      "clearing an empty store reports zero without failing",
+			seed:      nil,
+			wantCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			for _, run := range tt.seed {
+				if err := s.SaveRun(ctx, run); err != nil {
+					t.Fatalf("SaveRun %s: %v", run.ID, err)
+				}
+			}
+
+			n, err := s.DeleteAllRuns(ctx)
+			if err != nil {
+				t.Fatalf("DeleteAllRuns: %v", err)
+			}
+			if n != tt.wantCount {
+				t.Errorf("DeleteAllRuns = %d, want %d", n, tt.wantCount)
+			}
+
+			remaining, err := s.ListAllRuns(ctx, 0)
+			if err != nil {
+				t.Fatalf("ListAllRuns: %v", err)
+			}
+			if len(remaining) != 0 {
+				t.Errorf("remaining runs = %d, want 0", len(remaining))
+			}
+			// 逐条确认按 ID 也读不到：ListAllRuns 空只说明列表查询没返回，
+			// 不能排除某条记录仍在表里但被排序/限制挡掉了。
+			for _, run := range tt.seed {
+				got, err := s.LoadRun(ctx, run.ID)
+				if err != nil {
+					t.Fatalf("LoadRun %s: %v", run.ID, err)
+				}
+				if got != nil {
+					t.Errorf("run %s still loadable after clearing", run.ID)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteAllRunsLeavesStoreUsable 确认清空只删数据、不动表结构：
+// 用 DROP TABLE 实现的话这里的 SaveRun 会报 "no such table"。
+func TestDeleteAllRunsLeavesStoreUsable(t *testing.T) {
+	tests := []struct{ name string }{{name: "a new run can be saved after clearing"}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			if err := s.SaveRun(ctx, Run{ID: "old", RepoPath: "/a#main", Status: StatusCompleted}); err != nil {
+				t.Fatalf("SaveRun old: %v", err)
+			}
+			if _, err := s.DeleteAllRuns(ctx); err != nil {
+				t.Fatalf("DeleteAllRuns: %v", err)
+			}
+
+			if err := s.SaveRun(ctx, Run{ID: "new", RepoPath: "/a#main", Status: StatusCompleted}); err != nil {
+				t.Fatalf("SaveRun after clear: %v", err)
+			}
+			got, err := s.LoadRun(ctx, "new")
+			if err != nil {
+				t.Fatalf("LoadRun: %v", err)
+			}
+			if got == nil {
+				t.Fatal("run saved after clearing is not loadable")
+			}
+		})
+	}
+}

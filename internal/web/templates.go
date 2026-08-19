@@ -130,6 +130,13 @@ const indexHTML = `<!DOCTYPE html>
   .del button { background: none; border: none; padding: 0; font: inherit; font-size: 14px;
                 color: #c5221f; cursor: pointer; }
   .del button:hover { text-decoration: underline; }
+
+  /* 清空全部单独一行、靠右，与表格内的行级删除按钮拉开距离——
+     两个破坏力差一个数量级的操作贴在一起，迟早会点错。 */
+  .toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  .toolbar button { background: #fff; color: #c5221f; border: 1px solid #f5c6c2;
+                    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
+  .toolbar button:hover { background: #fce8e6; }
 </style>
 </head>
 <body>
@@ -141,6 +148,12 @@ const indexHTML = `<!DOCTYPE html>
 {{if .Notice}}<div class="banner ok">{{.Notice}}</div>{{end}}
 {{if .Error}}<div class="banner err">{{.Error}}</div>{{end}}
 {{if .Rows}}
+  {{/* 确认文案带上条数，让用户点之前就知道这一下要毁掉多少东西。
+       说"至少 N 条"是因为列表页有展示上限，库里可能比页面上看到的更多。 */}}
+  <form class="toolbar" method="post" action="/delete-all"
+        onsubmit="return confirm('清空全部审查记录？至少 {{.Total}} 条记录及其消息历史会被一并删除，无法恢复。')">
+    <button type="submit">清空全部记录</button>
+  </form>
   <table>
     <thead><tr>
       <th style="width:150px">时间</th>

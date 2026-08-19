@@ -28,6 +28,10 @@ type fakeSource struct {
 	// 用来断言"按钮上的 ID 确实传到了 store"。用指针是因为 fakeSource 按值传递。
 	deleteErr error
 	deleted   *[]string
+
+	// deleteAllErr 让测试模拟清空失败；deleteAllCalls 记录端点被调了几次。
+	deleteAllErr   error
+	deleteAllCalls *int
 }
 
 func (f fakeSource) ListAllRuns(_ context.Context, limit int) ([]store.Run, error) {
@@ -65,6 +69,16 @@ func (f fakeSource) DeleteRun(_ context.Context, id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (f fakeSource) DeleteAllRuns(_ context.Context) (int64, error) {
+	if f.deleteAllCalls != nil {
+		*f.deleteAllCalls++
+	}
+	if f.deleteAllErr != nil {
+		return 0, f.deleteAllErr
+	}
+	return int64(len(f.runs)), nil
 }
 
 func get(t *testing.T, source RunSource, target string) *httptest.ResponseRecorder {
@@ -1055,6 +1069,162 @@ func TestIndexBannerIsEscaped(t *testing.T) {
 			}
 			if !strings.Contains(body, "&lt;script&gt;") {
 				t.Errorf("escaped banner text not found in body: %s", body)
+			}
+		})
+	}
+}
+
+// TestHandleDeleteAll 覆盖清空端点：正常清空、库本来就空、持久化失败、
+// 以及 GET 不该生效。
+func TestHandleDeleteAll(t *testing.T) {
+	tests := []struct {
+		name         string
+		method       string
+		runs         []store.Run
+		deleteAllErr error
+		wantCode     int
+		wantLocation []string
+		wantCalls    int
+	}{
+		{
+			name:   "clearing a populated store reports how many went",
+			method: http.MethodPost,
+			runs: []store.Run{
+				{ID: "run-1", RepoPath: "/repo#main"},
+				{ID: "run-2", RepoPath: "/repo#dev"},
+			},
+			wantCode: http.StatusSeeOther,
+			// 条数要出现在提示里：用户点完得知道实际删掉了多少。
+			wantLocation: []string{"/?", "notice=", "2"},
+			wantCalls:    1,
+		},
+		{
+			// 库本来就是空的不算错误——用户想要的"清空"状态已经达成。
+			name:         "clearing an empty store is not an error",
+			method:       http.MethodPost,
+			runs:         nil,
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"/?", "notice="},
+			wantCalls:    1,
+		},
+		{
+			name:         "a store failure comes back as a message not a 500",
+			method:       http.MethodPost,
+			runs:         []store.Run{{ID: "run-1", RepoPath: "/repo#main"}},
+			deleteAllErr: errors.New("database is locked"),
+			wantCode:     http.StatusSeeOther,
+			wantLocation: []string{"error=", "database+is+locked"},
+			wantCalls:    1,
+		},
+		{
+			// 清空是这个服务里破坏力最大的操作，绝不能被一个预取链接触发。
+			name:      "a GET never clears anything",
+			method:    http.MethodGet,
+			runs:      []store.Run{{ID: "run-1", RepoPath: "/repo#main"}},
+			wantCode:  http.StatusMethodNotAllowed,
+			wantCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			source := fakeSource{runs: tt.runs, deleteAllErr: tt.deleteAllErr, deleteAllCalls: &calls}
+
+			var req *http.Request
+			if tt.method == http.MethodPost {
+				req = postForm("/delete-all", url.Values{})
+			} else {
+				req = httptest.NewRequest(tt.method, "/delete-all", nil)
+			}
+			rec := serve(t, source, nil, req)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantCode, rec.Body.String())
+			}
+			if calls != tt.wantCalls {
+				t.Errorf("DeleteAllRuns called %d times, want %d", calls, tt.wantCalls)
+			}
+			for _, want := range tt.wantLocation {
+				if got := rec.Header().Get("Location"); !strings.Contains(got, want) {
+					t.Errorf("Location %q does not contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteEndpointsAreDistinct 固定住"单条删除"和"清空全部"是两个端点：
+// 让 /delete 靠"run 参数为空"表示全删的话，一个漏传参数的表单就会从删一条
+// 静默变成清空整个库。这里断言 /delete 缺参数是 400，且没有碰到清空逻辑。
+func TestDeleteEndpointsAreDistinct(t *testing.T) {
+	tests := []struct{ name string }{{name: "a delete without a run id never clears the store"}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			var deleted []string
+			source := fakeSource{
+				runs:           []store.Run{{ID: "run-1", RepoPath: "/repo#main"}},
+				deleted:        &deleted,
+				deleteAllCalls: &calls,
+			}
+			rec := serve(t, source, nil, postForm("/delete", url.Values{}))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+			if calls != 0 {
+				t.Error("/delete without a run id reached DeleteAllRuns")
+			}
+			if len(deleted) != 0 {
+				t.Errorf("/delete without a run id deleted %v", deleted)
+			}
+		})
+	}
+}
+
+// TestIndexRendersDeleteAllControl 固定住清空入口的形态：POST 表单、
+// 确认文案里带上条数。
+func TestIndexRendersDeleteAllControl(t *testing.T) {
+	tests := []struct {
+		name     string
+		runs     []store.Run
+		wantHTML []string
+		skipHTML []string
+	}{
+		{
+			name: "a populated index offers a confirming clear-all form",
+			runs: []store.Run{
+				{ID: "run-1", RepoPath: "/repo#main"},
+				{ID: "run-2", RepoPath: "/repo#dev"},
+			},
+			wantHTML: []string{`action="/delete-all"`, `method="post"`, "confirm(", "2 条记录"},
+		},
+		{
+			// 一条记录都没有时不该渲染出一个点了什么都不会发生的清空按钮。
+			name:     "an empty index has no clear-all form",
+			runs:     nil,
+			skipHTML: []string{`action="/delete-all"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := get(t, fakeSource{runs: tt.runs}, "/")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			body := rec.Body.String()
+			for _, want := range tt.wantHTML {
+				if !strings.Contains(body, want) {
+					t.Errorf("index page missing %q", want)
+				}
+			}
+			for _, skip := range tt.skipHTML {
+				if strings.Contains(body, skip) {
+					t.Errorf("index page unexpectedly contains %q", skip)
+				}
 			}
 		})
 	}

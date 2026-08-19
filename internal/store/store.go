@@ -538,3 +538,21 @@ func (s *Store) DeleteRun(ctx context.Context, id string) (deleted bool, err err
 	}
 	return true, nil
 }
+
+// DeleteAllRuns 清空 runs 表，返回删掉的条数。
+//
+// 不用逐条 DeleteRun 循环：那样每条都要跑一次清子指针的 UPDATE，而全删之后
+// 根本没有记录剩下来需要清指针，纯属浪费。整表删一次就够。
+//
+// 库本来就是空的时候返回 (0, nil)，不算错误——用户想要的"清空"状态已经达成。
+func (s *Store) DeleteAllRuns(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM runs`)
+	if err != nil {
+		return 0, fmt.Errorf("delete all runs: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete all runs: %w", err)
+	}
+	return affected, nil
+}

@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,9 +23,9 @@ import (
 
 // RunSource 提供 Web 层需要的记录访问能力，由 *store.Store 实现。
 //
-// 只声明这三个方法而不是直接收 *store.Store：列表页要的是"全部记录"，
-// 详情页要的是"按 ID 取一条"，加上一个删除。Store 上其余的写入方法和
-// 恢复用查询与展现层无关，不该暴露给它。
+// 只声明这四个方法而不是直接收 *store.Store：列表页要的是"全部记录"，
+// 详情页要的是"按 ID 取一条"，加上单条删除和清空。Store 上其余的写入方法
+// 和恢复用查询与展现层无关，不该暴露给它。
 type RunSource interface {
 	// ListAllRuns 跨仓库、跨分支列出历史运行，按更新时间倒序，最多 limit 条。
 	ListAllRuns(ctx context.Context, limit int) ([]store.Run, error)
@@ -36,6 +37,8 @@ type RunSource interface {
 	// 数据的操作。放进 Reviewer 会让"模型没配好"连删记录都做不了，而清理
 	// 一条跑坏的记录恰恰是这种时候最想做的事。
 	DeleteRun(ctx context.Context, id string) (bool, error)
+	// DeleteAllRuns 清空全部记录，返回删掉的条数。
+	DeleteAllRuns(ctx context.Context) (int64, error)
 }
 
 // Reviewer 是需要调用大模型的那部分交互能力，由 cmd 入口注入 engine 的实现。
@@ -82,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/reply", s.handleReply)
 	mux.HandleFunc("/rereview", s.handleRereview)
 	mux.HandleFunc("/delete", s.handleDelete)
+	mux.HandleFunc("/delete-all", s.handleDeleteAll)
 	return mux
 }
 
@@ -136,6 +140,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	page := indexPage{
 		Rows:   rows,
+		Total:  len(rows),
 		Notice: r.URL.Query().Get("notice"),
 		Error:  r.URL.Query().Get("error"),
 	}
@@ -149,7 +154,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // 比直接传 []indexRow 多包一层是为了带上操作结果提示：删除完成后要重定向回
 // 列表页，用户得知道刚才那一下到底删掉了没有。
 type indexPage struct {
-	Rows   []indexRow
+	Rows []indexRow
+	// Total 是本页实际渲染的行数，用在"清空全部"的确认文案里。
+	//
+	// 它不等于库里的总条数：列表页有 defaultListLimit 上限，撞上限时页面上
+	// 只有 200 行而库里可能更多。所以确认文案措辞是"至少 N 条"而不是"N 条"，
+	// 避免给出一个说小了的数字让用户低估这次操作的破坏范围。
+	Total  int
 	Notice string
 	Error  string
 }
@@ -328,6 +339,29 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectToIndex(w, r, "已删除记录 "+runID, "")
+}
+
+// handleDeleteAll 处理"清空全部审查记录"的表单提交。
+//
+// 单开一个端点而不是让 /delete 靠"run 参数为空"来表示全删：那样一个漏传
+// 参数的表单就会从"删一条"静默变成"清空整个库"，代价与意图完全不成比例。
+// 一个不同的 URL 让这两件事在路由层就分开。
+func (s *Server) handleDeleteAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "该端点只接受 POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	n, err := s.source.DeleteAllRuns(r.Context())
+	if err != nil {
+		redirectToIndex(w, r, "", "清空失败: "+err.Error())
+		return
+	}
+	if n == 0 {
+		redirectToIndex(w, r, "没有可删除的记录", "")
+		return
+	}
+	redirectToIndex(w, r, "已清空全部记录，共 "+strconv.FormatInt(n, 10)+" 条", "")
 }
 
 // beginAction 是两个 POST 端点共用的前置检查：方法、reviewer 是否就绪、
