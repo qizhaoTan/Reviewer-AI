@@ -108,3 +108,15 @@ func git(ctx context.Context, repoDir string, args ...string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// StageAll stages every change in the repository, equivalent to running
+// `git add -A` at the repository root. Unlike `git add .`, which is relative to
+// the current directory, this always covers the whole work tree regardless of
+// where the command was invoked from — that is what callers mean by "stage
+// everything before reviewing".
+func StageAll(ctx context.Context, repoDir string) error {
+	if _, err := git(ctx, repoDir, "add", "-A", "--"); err != nil {
+		return fmt.Errorf("stage all changes: %w", err)
+	}
+	return nil
+}

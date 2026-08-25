@@ -94,6 +94,11 @@ type File struct {
 	Roles    Roles                  `json:"roles"`
 	Critique Critique               `json:"critique"`
 
+	// AutoStage 为 true 时，命令行审查在采集变更前先执行一次 `git add -A`，
+	// 省掉"忘了 add 导致审查看到空暂存区"的来回。默认 false：自动改动索引
+	// 是有副作用的行为，得由用户显式打开。
+	AutoStage bool `json:"auto_stage"`
+
 	// LanguagePrompt 是追加到每段 system prompt 末尾的语言约束，整段照抄进
 	// 提示词。用指针是为了区分"配置里没写"（走默认的中文）和"显式配成空串"
 	// （不加任何语言约束）。取值请走 LanguagePromptOrDefault。

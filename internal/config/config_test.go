@@ -312,3 +312,43 @@ func TestFile_LanguagePromptOrDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_AutoStage(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "absent defaults to false",
+			content: `{"models": {}, "roles": {"primary": "m"}}`,
+			want:    false,
+		},
+		{
+			name:    "explicit true",
+			content: `{"models": {}, "roles": {"primary": "m"}, "auto_stage": true}`,
+			want:    true,
+		},
+		{
+			name:    "explicit false",
+			content: `{"models": {}, "roles": {"primary": "m"}, "auto_stage": false}`,
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			got, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got.AutoStage != tt.want {
+				t.Fatalf("AutoStage = %v, want %v", got.AutoStage, tt.want)
+			}
+		})
+	}
+}

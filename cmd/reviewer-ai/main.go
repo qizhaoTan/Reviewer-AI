@@ -127,20 +127,9 @@ func runReview(args []string) {
 	}
 
 	ctx := context.Background()
-	changes, err := gitdiff.LoadStaged(ctx, repoAbs)
-	if err != nil {
-		fail("load staged changes: %v", err)
-	}
-	if len(changes) == 0 {
-		fmt.Println("No staged changes to review.")
-		return
-	}
 
-	branch, err := gitdiff.CurrentBranch(ctx, repoAbs)
-	if err != nil {
-		fail("resolve current branch: %v", err)
-	}
-
+	// 配置要在采集变更之前加载：auto_stage 决定了要不要先 `git add -A`，
+	// 而那必须发生在 LoadStaged 读取索引之前。
 	path := *configPath
 	if path == "" {
 		path, err = config.DefaultPath()
@@ -155,6 +144,26 @@ func runReview(args []string) {
 	modelCfg, err := cfgFile.Resolve()
 	if err != nil {
 		fail("resolve model config: %v", err)
+	}
+
+	if cfgFile.AutoStage {
+		if err := gitdiff.StageAll(ctx, repoAbs); err != nil {
+			fail("auto-stage changes: %v", err)
+		}
+	}
+
+	changes, err := gitdiff.LoadStaged(ctx, repoAbs)
+	if err != nil {
+		fail("load staged changes: %v", err)
+	}
+	if len(changes) == 0 {
+		fmt.Println("No staged changes to review.")
+		return
+	}
+
+	branch, err := gitdiff.CurrentBranch(ctx, repoAbs)
+	if err != nil {
+		fail("resolve current branch: %v", err)
 	}
 
 	db, err := store.New("")

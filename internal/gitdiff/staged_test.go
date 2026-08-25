@@ -218,3 +218,113 @@ func TestSnapshotHashDoesNotMutateInput(t *testing.T) {
 		}
 	}
 }
+
+func TestStageAll(t *testing.T) {
+	type WantChange struct {
+		status string
+		path   string
+	}
+	tests := []struct {
+		name string
+		// arrange 返回 (repo 根, 传给 StageAll 的目录)。两者可以不同，
+		// 用来验证在子目录调用时依然覆盖整棵工作树。
+		arrange     func(*testing.T) (string, string)
+		wantErr     bool
+		wantChanges []WantChange
+	}{
+		{
+			name: "stages new, modified and deleted files across the whole tree",
+			arrange: func(t *testing.T) (string, string) {
+				repo := newRepo(t)
+				writeFile(t, filepath.Join(repo, "kept.go"), "package a\n\nconst v = \"base\"\n")
+				writeFile(t, filepath.Join(repo, "gone.go"), "package a\n")
+				runGit(t, repo, "add", ".")
+				runGit(t, repo, "commit", "-m", "initial")
+
+				writeFile(t, filepath.Join(repo, "kept.go"), "package a\n\nconst v = \"changed\"\n")
+				if err := os.Remove(filepath.Join(repo, "gone.go")); err != nil {
+					t.Fatalf("remove gone.go: %v", err)
+				}
+				if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+					t.Fatalf("mkdir sub: %v", err)
+				}
+				writeFile(t, filepath.Join(repo, "sub", "added.go"), "package sub\n")
+				return repo, repo
+			},
+			wantChanges: []WantChange{
+				{status: "D", path: "gone.go"},
+				{status: "M", path: "kept.go"},
+				{status: "A", path: "sub/added.go"},
+			},
+		},
+		{
+			name: "called from a subdirectory still stages the whole tree",
+			arrange: func(t *testing.T) (string, string) {
+				repo := newRepo(t)
+				writeFile(t, filepath.Join(repo, "root.go"), "package a\n")
+				runGit(t, repo, "add", ".")
+				runGit(t, repo, "commit", "-m", "initial")
+
+				if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+					t.Fatalf("mkdir sub: %v", err)
+				}
+				writeFile(t, filepath.Join(repo, "sub", "added.go"), "package sub\n")
+				writeFile(t, filepath.Join(repo, "root.go"), "package a\n\nconst v = 1\n")
+				return repo, filepath.Join(repo, "sub")
+			},
+			wantChanges: []WantChange{
+				{status: "M", path: "root.go"},
+				{status: "A", path: "sub/added.go"},
+			},
+		},
+		{
+			name: "clean tree stages nothing and does not error",
+			arrange: func(t *testing.T) (string, string) {
+				repo := newRepo(t)
+				writeFile(t, filepath.Join(repo, "a.go"), "package a\n")
+				runGit(t, repo, "add", ".")
+				runGit(t, repo, "commit", "-m", "initial")
+				return repo, repo
+			},
+			wantChanges: nil,
+		},
+		{
+			name: "not a git repository reports an error",
+			arrange: func(t *testing.T) (string, string) {
+				dir := t.TempDir()
+				return dir, dir
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, dir := tt.arrange(t)
+
+			err := StageAll(context.Background(), dir)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("StageAll() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("StageAll() error = %v", err)
+			}
+
+			changes, err := LoadStaged(context.Background(), repo)
+			if err != nil {
+				t.Fatalf("LoadStaged() error = %v", err)
+			}
+			if len(changes) != len(tt.wantChanges) {
+				t.Fatalf("LoadStaged() returned %d changes, want %d: %+v", len(changes), len(tt.wantChanges), changes)
+			}
+			for i, want := range tt.wantChanges {
+				if changes[i].Status != want.status || changes[i].Path != want.path {
+					t.Fatalf("change[%d] = (%s, %s), want (%s, %s)", i, changes[i].Status, changes[i].Path, want.status, want.path)
+				}
+			}
+		})
+	}
+}
