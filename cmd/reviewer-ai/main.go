@@ -21,15 +21,25 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/web"
 )
 
+// version 由构建时的 -ldflags "-X main.version=..." 注入；直接 go build 时
+// 保持 dev，用来区分本地构建和分发出去的版本。
+var version = "dev"
+
 func main() {
 	log.InitDebug()
 
 	// 子命令分发：只有 web 一个子命令，用 os.Args[1] 直接判断就够了，
 	// 不值得为此引入 cobra。默认（无子命令）走审查流程，保持 `reviewer-ai`
 	// 裸跑一次审查的既有用法不变。
-	if len(os.Args) > 1 && os.Args[1] == "web" {
-		runWeb(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "web":
+			runWeb(os.Args[2:])
+			return
+		case "version", "-version", "--version":
+			fmt.Println(version)
+			return
+		}
 	}
 	runReview(os.Args[1:])
 }
