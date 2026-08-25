@@ -80,9 +80,17 @@ const fallbackCritiqueMaxTurns = 30
 // 复核只做减法：没有任何路径可以新增意见或改写意见内容。复核阶段引入初审
 // 没看到的新臆测，比漏掉一条意见更糟。
 //
-// 单条复核失败（模型报错、超轮数、上下文取消）不会中断整体：那一条按"保留"
-// 处理并在 CritiqueReason 里写明原因。理由是失败属于系统问题而非意见本身的
-// 问题，因为基础设施抖动就默默吞掉一条可能有效的审查意见，是最糟的失败方式。
+// 单条复核失败分两种，处理方式完全不同：
+//
+//   - 模型行为问题（超轮数：复核者一直不肯给裁决）按"保留"处理，并在
+//     CritiqueReason 里写明原因。重跑也大概率还是这个结果，不值得为它作废
+//     整个复核阶段；而因为复核者话多就默默吞掉一条可能有效的审查意见，
+//     是最糟的失败方式。
+//
+//   - 基础设施问题（Generate 报错、上下文取消/超时）则中断整体并上抛，由
+//     engine.Run 让运行留在 in_progress、下次重跑时只重跑复核。这类失败跟
+//     意见本身无关，把"网络抖了一下"固化成"复核未能完成"写进报告并标记
+//     completed，会让这条意见永远失去被真正复核的机会。
 func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, changes []gitdiff.Change) (review.Report, error) {
 	out := report
 	out.Critiqued = true
@@ -106,7 +114,13 @@ func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, chan
 			f := out.Findings[i]
 			verdict, err := critiqueOne(gctx, deps, f, patchByPath[f.File])
 			if err != nil {
-				// 保留而不是丢弃：见函数注释里对失败的处理原则。
+				// 基础设施问题：上抛以中断整体，让这次复核有机会重跑。
+				// errgroup 会连带取消其余仍在跑的复核。
+				if isRecoverable(err) {
+					log.Error("复核遇到可恢复的失败，中断本次复核", "findingID", f.ID, "error", err)
+					return fmt.Errorf("finding %s: %w", f.ID, err)
+				}
+				// 模型行为问题：保留而不是丢弃，见函数注释里对失败的处理原则。
 				log.Error("复核失败，保留该条意见", "findingID", f.ID, "error", err)
 				out.Findings[i].Kept = true
 				out.Findings[i].CritiqueReason = fmt.Sprintf("复核未能完成（%v），保留该条意见", err)
@@ -118,10 +132,10 @@ func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, chan
 			return nil
 		})
 	}
-	// 每个 goroutine 都吞掉了自己的错误，这里不会拿到非 nil；保留返回值检查是
-	// 为了将来真的引入"应当中断整体"的错误时不会漏掉。
+	// 只有可恢复的失败会走到这里（其余都被 goroutine 自己消化成"保留该条意见"）。
+	// 包成 recoverableError 上抛，让 engine.Run 据此保持 in_progress。
 	if err := g.Wait(); err != nil {
-		return review.Report{}, fmt.Errorf("critique findings: %w", err)
+		return review.Report{}, recoverable(fmt.Errorf("critique findings: %w", err))
 	}
 	return out, nil
 }
@@ -142,7 +156,8 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 	for range maxTurns {
 		resp, err := deps.LLM.Generate(ctx, msgs, toolDefinitions)
 		if err != nil {
-			return tool.Verdict{}, fmt.Errorf("generate verdict: %w", err)
+			// 标记为可恢复：调用方据此中断整体而不是把它写成"复核未能完成"。
+			return tool.Verdict{}, recoverable(fmt.Errorf("generate verdict: %w", err))
 		}
 		msgs = append(msgs, *resp)
 

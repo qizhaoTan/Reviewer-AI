@@ -106,6 +106,7 @@ func runReview(args []string) {
 	fs := flag.NewFlagSet("review", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config.json (default: ~/.reviewer/config.json or $REVIEWER_AI_CONFIG)")
 	repoDir := fs.String("repo", ".", "path to the git repository to review")
+	fresh := fs.Bool("fresh", false, "ignore any resumable run for these changes and start a new review from scratch")
 	if err := fs.Parse(args); err != nil {
 		fail("parse flags: %v", err)
 	}
@@ -157,6 +158,7 @@ func runReview(args []string) {
 		fail("%v", err)
 	}
 	deps.Store = db
+	deps.Fresh = *fresh
 
 	run, err := engine.Run(ctx, deps, repoAbs, branch, changes, modelCfg.Timeout())
 	if err != nil {

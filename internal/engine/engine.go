@@ -44,6 +44,12 @@ type Deps struct {
 	// 由调用方从配置读出（config.File.LanguagePromptOrDefault）后传入；
 	// 留空表示不加语言约束。
 	LanguagePrompt string
+
+	// Fresh 为 true 时跳过历史记录复用，强制新建一条运行记录从头审查。
+	// 需要它是因为可恢复失败（见 recoverableRun）会让记录留在 in_progress
+	// 并被无限续跑：如果一条记录的消息历史本身就是坏的（比如模型钻进了死
+	// 胡同），续跑只会一直撞同一堵墙，得有个逃生舱能重开一局。
+	Fresh bool
 }
 
 // Run 执行一次完整的审查：查找或新建一条 Run 记录，驱动 tool loop 直到模型
@@ -63,7 +69,7 @@ type Deps struct {
 func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
 	runKey := buildRunKey(repoAbs, branch)
 
-	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes, deps.LanguagePrompt)
+	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes, deps.LanguagePrompt, deps.Fresh)
 	if err != nil {
 		return nil, fmt.Errorf("resume or start run: %w", err)
 	}
@@ -97,7 +103,12 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 	for iteration := 1; iteration <= maxToolLoopIterations; iteration++ {
 		resp, err := deps.LLM.Generate(genCtx, msgs, toolDefinitions)
 		if err != nil {
-			return nil, failRun(ctx, deps.Store, run, "generate review: %w", err)
+			// 刻意**不**标记 failed：Generate 出错基本都是网络抖动或超出本次
+			// 时间预算这类外部原因，跟已经攒下来的消息历史无关。留在
+			// in_progress，下次重跑时 resumeOrStartRun 就能沿用这些历史接着
+			// 问下去；标记成 failed 反而会让它被判定为不可复用、重新审一遍，
+			// 白白丢掉这一轮之前所有已经付过费的工具调用。
+			return nil, recoverableRun(run, "generate review: %w", err)
 		}
 		msgs = append(msgs, *resp)
 		setMessages(ctx, deps.Store, run, msgs)
@@ -201,11 +212,17 @@ func buildRunKey(repoAbs, branch string) string {
 //
 // 用内容 hash 而不是"最新一条记录"做比较，是为了覆盖 git stash / stash pop
 // 这类场景——旧记录不会因为不是最新就被忽略，只要内容相同就能找到。
-func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, changes []gitdiff.Change, languagePrompt string) (*store.Run, error) {
+//
+// fresh 为 true 时跳过上面整套匹配，无条件新建一条记录，见 Deps.Fresh。
+func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, changes []gitdiff.Change, languagePrompt string, fresh bool) (*store.Run, error) {
 	hash := gitdiff.SnapshotHash(changes)
 	matched, err := db.LoadRunByHash(ctx, runKey, hash)
 	if err != nil {
 		return nil, fmt.Errorf("load run by hash: %w", err)
+	}
+	if fresh && matched != nil {
+		log.Info("已指定 fresh，忽略可复用的历史记录，重新开始审查", "ignoredRunID", matched.ID, "ignoredStatus", matched.Status)
+		matched = nil
 	}
 	if matched != nil {
 		switch matched.Status {
@@ -255,10 +272,16 @@ func setReport(ctx context.Context, db *store.Store, run *store.Run, report revi
 // 已经落盘了，这条记录的真实状态就是"初审已完成、复核未完成"。标记成 failed
 // 反而会让 resumeOrStartRun 把它当成不可复用的记录、下次重新跑一遍初审
 // （见那里对 StatusFailed 的处理），白白丢掉已经付过费的初审结果。
+//
+// 下次重跑时 Run 会命中"初审已完成但复核未完成"那条分支，直接从复核接着跑。
+// 注意复核结果目前不逐条落盘，所以重跑会把所有意见都重新复核一遍——复核单条
+// 的成本远低于初审整个 changeset，先这么办；等真觉得贵了再考虑逐条落盘。
 func finishWithCritique(ctx context.Context, deps Deps, run *store.Run, repoAbs string, changes []gitdiff.Change) error {
 	final, err := critiqueReport(ctx, deps, run.Report(), repoAbs, changes)
 	if err != nil {
-		return fmt.Errorf("critique review: %w", err)
+		// wrapRecoverable 而不是 fmt.Errorf：加了这层上下文之后，
+		// 调用方仍然要能看出底下那个失败是不是可恢复的。
+		return wrapRecoverable(err, "critique review: %w")
 	}
 	setReport(ctx, deps.Store, run, final)
 	setStatus(ctx, deps.Store, run, store.StatusCompleted)
@@ -274,7 +297,21 @@ func setStatus(ctx context.Context, db *store.Store, run *store.Run, status stor
 }
 
 // failRun 把 run 标记为 failed 并落盘，然后返回格式化好的错误供调用方处理。
+// 只用于不可恢复的失败——重跑同一份消息历史也只会再次撞上同样的墙，
+// 典型例子是超出轮数上限。可恢复的失败请用 recoverableRun。
 func failRun(ctx context.Context, db *store.Store, run *store.Run, format string, args ...any) error {
 	setStatus(ctx, db, run, store.StatusFailed)
 	return fmt.Errorf(format, args...)
+}
+
+// recoverableRun 处理可恢复的失败：只返回错误，**不动** run 的状态，让它保持
+// in_progress，这样下次重跑会被 resumeOrStartRun 认出来、沿用已落盘的消息历史
+// 接着跑，而不是从头审一遍。
+//
+// 之所以是一个什么都不做的函数而不是直接 return fmt.Errorf，是为了在调用点
+// 和 failRun 形成对称、让"这里选的是哪一种失败语义"一眼可见——两个分支长得
+// 一样的话，很容易在后续修改中不知不觉退化成全都标记 failed。
+func recoverableRun(run *store.Run, format string, args ...any) error {
+	log.Info("本次运行以可恢复的失败结束，记录保持 in_progress 以便下次续跑", "runID", run.ID, "messages", len(run.Messages))
+	return recoverable(fmt.Errorf(format, args...))
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -282,15 +283,21 @@ func TestRunExposesSubmitReviewToTheModel(t *testing.T) {
 	}
 }
 
-func TestRunGenerateFailureMarksRunFailed(t *testing.T) {
+// TestRunGenerateFailureStaysResumable 锁住"Generate 失败可恢复"这条语义：
+// 网络抖动跟已经攒下的消息历史无关，运行必须留在 in_progress，这样下次重跑
+// 才能沿用这些历史接着问，而不是从头审一遍、白白丢掉已经付过费的工具调用。
+func TestRunGenerateFailureStaysResumable(t *testing.T) {
 	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
 
 	tests := []struct {
 		name  string
 		errAt int
+		// wantMessages 是失败落盘后消息历史至少应有的条数。初始的
+		// [system, user] 两条一定在；errAt=1 时还多攒了一轮工具往返。
+		wantMinMessages int
 	}{
-		{name: "failing on the first turn", errAt: 0},
-		{name: "failing after some progress", errAt: 1},
+		{name: "failing on the first turn", errAt: 0, wantMinMessages: 2},
+		{name: "failing after some progress", errAt: 1, wantMinMessages: 3},
 	}
 
 	for _, tt := range tests {
@@ -310,8 +317,138 @@ func TestRunGenerateFailureMarksRunFailed(t *testing.T) {
 			if !strings.Contains(err.Error(), "upstream exploded") {
 				t.Errorf("error %q does not mention the underlying cause", err)
 			}
-			if got := latestRun(t, db, repoAbs, "main").Status; got != store.StatusFailed {
-				t.Errorf("persisted Status = %q, want %q", got, store.StatusFailed)
+
+			got := latestRun(t, db, repoAbs, "main")
+			if got.Status != store.StatusInProgress {
+				t.Errorf("persisted Status = %q, want %q: a provider failure must leave the run resumable",
+					got.Status, store.StatusInProgress)
+			}
+			if len(got.Messages) < tt.wantMinMessages {
+				t.Errorf("persisted %d messages, want at least %d: the history so far must survive the failure",
+					len(got.Messages), tt.wantMinMessages)
+			}
+		})
+	}
+}
+
+// TestRunResumesAfterGenerateFailure 走完整的两趟：第一趟中途 Generate 失败，
+// 第二趟必须接着同一条记录跑完，而不是新建一条从头审。
+func TestRunResumesAfterGenerateFailure(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name string
+	}{
+		{name: "the second attempt continues the same run"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoAbs := t.TempDir()
+
+			// 第一趟：先成功跑一轮工具调用，第二轮 Generate 炸掉。
+			failing := &fakeProvider{
+				script: []schema.Message{globCall("tc1"), globCall("tc2")},
+				err:    errors.New("upstream exploded"),
+				errAt:  1,
+			}
+			deps, db := newTestDeps(t, failing, changes)
+			if _, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute); err == nil {
+				t.Fatal("first Run() error = nil, want the provider failure to surface")
+			}
+			first := latestRun(t, db, repoAbs, "main")
+			resumedFrom := len(first.Messages)
+
+			// 第二趟：换一个正常的 provider，复用同一个 store。
+			deps.LLM = &fakeProvider{script: []schema.Message{submitCall("tc3", "done",
+				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "swallowed error"})}}
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("second Run() error = %v", err)
+			}
+
+			if run.ID != first.ID {
+				t.Errorf("second attempt used run %s, want it to resume %s instead of starting over",
+					run.ID, first.ID)
+			}
+			if run.Status != store.StatusCompleted {
+				t.Errorf("Status = %q, want %q", run.Status, store.StatusCompleted)
+			}
+			if len(run.Messages) <= resumedFrom {
+				t.Errorf("len(Messages) = %d, want more than the %d carried over: the resumed run must build on the old history",
+					len(run.Messages), resumedFrom)
+			}
+			if got := len(run.Report().Findings); got != 1 {
+				t.Errorf("len(Findings) = %d, want 1", got)
+			}
+
+			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main"), 10)
+			if err != nil {
+				t.Fatalf("ListRuns: %v", err)
+			}
+			if len(runs) != 1 {
+				t.Errorf("persisted %d runs, want 1: resuming must not leave an orphaned record behind", len(runs))
+			}
+		})
+	}
+}
+
+// TestRunFreshIgnoresResumableRun 锁住 -fresh 的逃生舱语义：哪怕存在一条
+// 内容相同、可续跑的记录，也要另起一条从头审。
+func TestRunFreshIgnoresResumableRun(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name       string
+		seedStatus store.RunStatus
+	}{
+		{name: "ignores a resumable in-progress run", seedStatus: store.StatusInProgress},
+		{name: "ignores a completed run instead of reusing its result", seedStatus: store.StatusCompleted},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoAbs := t.TempDir()
+
+			// 先种一条内容相同的记录：不带 fresh 时它会被复用。
+			seeding := &fakeProvider{
+				script: []schema.Message{globCall("tc1"), globCall("tc2")},
+				err:    errors.New("upstream exploded"),
+				errAt:  1,
+			}
+			deps, db := newTestDeps(t, seeding, changes)
+			if _, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute); err == nil {
+				t.Fatal("seeding Run() error = nil, want the provider failure to surface")
+			}
+			seeded := latestRun(t, db, repoAbs, "main")
+			if tt.seedStatus == store.StatusCompleted {
+				seeded.Status = store.StatusCompleted
+				if err := db.SaveRun(context.Background(), seeded); err != nil {
+					t.Fatalf("SaveRun: %v", err)
+				}
+			}
+
+			deps.LLM = &fakeProvider{script: []schema.Message{submitCall("tc3", "done",
+				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "swallowed error"})}}
+			deps.Fresh = true
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if run.ID == seeded.ID {
+				t.Errorf("Run reused run %s, want -fresh to start a new one", seeded.ID)
+			}
+			if run.Status != store.StatusCompleted {
+				t.Errorf("Status = %q, want %q", run.Status, store.StatusCompleted)
+			}
+
+			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main"), 10)
+			if err != nil {
+				t.Fatalf("ListRuns: %v", err)
+			}
+			if len(runs) != 2 {
+				t.Errorf("persisted %d runs, want 2: -fresh must add a record, not overwrite the old one", len(runs))
 			}
 		})
 	}
@@ -349,12 +486,24 @@ type reviewThenCritiqueProvider struct {
 	// critiqueCalls 记录复核阶段发生了多少次 Generate。复核是并发的，
 	// 多个 goroutine 会同时命中这个计数器，必须用原子操作。
 	critiqueCalls atomic.Int64
+
+	// mu 保护 critiqueErr：它会在两趟 Run 之间被改写，而复核 goroutine 并发读它。
+	mu sync.Mutex
+	// critiqueErr 非 nil 时复核阶段的 Generate 一律以该错误告终，用来模拟
+	// 基础设施抖动。
+	critiqueErr error
 }
 
 func (p *reviewThenCritiqueProvider) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
 	for _, t := range tools {
 		if t.Name == tool.CritiqueVerdictName {
 			p.critiqueCalls.Add(1)
+			p.mu.Lock()
+			critiqueErr := p.critiqueErr
+			p.mu.Unlock()
+			if critiqueErr != nil {
+				return nil, critiqueErr
+			}
 			keep := p.keep == nil || p.keep(msgs[1].Content)
 			args, _ := json.Marshal(tool.Verdict{Keep: keep, Reason: "verdict"})
 			return &schema.Message{
@@ -364,6 +513,90 @@ func (p *reviewThenCritiqueProvider) Generate(ctx context.Context, msgs []schema
 		}
 	}
 	return p.fakeProvider.Generate(ctx, msgs, tools)
+}
+
+// critiqueFailure 让 reviewThenCritiqueProvider 的复核阶段报错。设成字段而不是
+// 构造参数，是为了能在两趟 Run 之间把它清掉，模拟"网络恢复了"。
+func (p *reviewThenCritiqueProvider) failCritique(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.critiqueErr = err
+}
+
+// TestRunResumesAfterCritiqueFailure 走完整的两趟：第一趟初审成功、复核因为
+// provider 报错中断，第二趟必须直接从复核接着跑——初审已经付过费了，不能重来。
+func TestRunResumesAfterCritiqueFailure(t *testing.T) {
+	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+
+	tests := []struct {
+		name string
+	}{
+		{name: "the retry re-runs only the critique"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &reviewThenCritiqueProvider{}
+			llm.script = []schema.Message{submitCall("tc1", "two comments",
+				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "real problem"},
+				map[string]any{"file": "config.go", "severity": "info", "summary": "noise"},
+			)}
+			llm.failCritique(errors.New("critic is down"))
+
+			base, db := newTestDeps(t, llm, changes)
+			deps := withCritique(base, changes)
+			repoAbs := t.TempDir()
+
+			// 第一趟：初审跑完并落盘，复核炸掉。
+			_, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err == nil {
+				t.Fatal("first Run() error = nil, want the critique failure to surface")
+			}
+			if !strings.Contains(err.Error(), "critic is down") {
+				t.Errorf("error %q does not mention the underlying cause", err)
+			}
+
+			first := latestRun(t, db, repoAbs, "main")
+			if first.Status != store.StatusInProgress {
+				t.Errorf("persisted Status = %q, want %q: the primary review is done and must not be thrown away",
+					first.Status, store.StatusInProgress)
+			}
+			if len(first.Findings) != 2 {
+				t.Fatalf("persisted Findings = %d, want 2: the primary review must survive the critique failure",
+					len(first.Findings))
+			}
+			if first.Critiqued {
+				t.Error("persisted Critiqued = true, want false: the critique never finished")
+			}
+
+			// 第二趟：复核恢复正常。初审脚本已经用尽，如果引擎错误地重跑初审，
+			// fakeProvider 会因为脚本耗尽而报错，这个用例就会失败。
+			llm.failCritique(nil)
+			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("second Run() error = %v", err)
+			}
+
+			if run.ID != first.ID {
+				t.Errorf("second attempt used run %s, want it to resume %s", run.ID, first.ID)
+			}
+			if run.Status != store.StatusCompleted {
+				t.Errorf("Status = %q, want %q", run.Status, store.StatusCompleted)
+			}
+			if !run.Critiqued {
+				t.Error("Critiqued = false, want true after the retry finished the critique")
+			}
+			if len(run.Findings) != 2 {
+				t.Errorf("len(Findings) = %d, want 2", len(run.Findings))
+			}
+			for i, f := range run.Findings {
+				if f.CritiqueReason != "verdict" {
+					t.Errorf("Findings[%d].CritiqueReason = %q, want the real verdict rather than a failure note",
+						i, f.CritiqueReason)
+				}
+			}
+		})
+	}
 }
 
 // TestRunPersistsFindings 验证审查结果确实写进了 Run 记录，而不只是随返回值传出。

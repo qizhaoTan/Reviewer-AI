@@ -99,6 +99,10 @@ func findingsNamed(summaries ...string) []review.Finding {
 	return out
 }
 
+// critiqueTestMaxTurns 是"超轮数"用例用的轮数上限。取一个小值让用例跑得快，
+// 又不至于小到跟正常用例（turns=3）的轮数撞上。
+const critiqueTestMaxTurns = 5
+
 func TestCritique(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -106,6 +110,8 @@ func TestCritique(t *testing.T) {
 		keepIf   func(string) bool
 		failIf   func(string) error
 		turns    int
+		// maxTurns 透传给 CritiqueDeps.MaxTurns，<=0 时走 engine 的兜底值。
+		maxTurns int
 		// wantKept 按 Finding 顺序给出期望的 Kept 值。
 		wantKept []bool
 		// wantReasonContains 按顺序断言 CritiqueReason 含有的片段，空串表示不检查。
@@ -135,16 +141,14 @@ func TestCritique(t *testing.T) {
 			wantKept: []bool{true},
 		},
 		{
-			name:     "a failing critique keeps the finding rather than silently dropping it",
-			findings: findingsNamed("fine", "explodes"),
-			failIf: func(msg string) error {
-				if strings.Contains(msg, "explodes") {
-					return errors.New("provider is down")
-				}
-				return nil
-			},
-			wantKept:           []bool{true, true},
-			wantReasonContains: []string{"", "provider is down"},
+			// 复核者一直不给裁决属于模型行为问题：重跑大概率还是这样，
+			// 所以按"保留"消化掉，不作废整个复核阶段。
+			name:               "a critic that never submits a verdict keeps the finding rather than silently dropping it",
+			findings:           findingsNamed("stalls"),
+			turns:              critiqueTestMaxTurns + 1,
+			maxTurns:           critiqueTestMaxTurns,
+			wantKept:           []bool{true},
+			wantReasonContains: []string{"超过复核轮数上限"},
 		},
 		{
 			name:     "no findings needs no critique",
@@ -161,6 +165,7 @@ func TestCritique(t *testing.T) {
 				Tools:       critiqueTestTools(),
 				RepoRoot:    t.TempDir(),
 				Concurrency: 4,
+				MaxTurns:    tt.maxTurns,
 			}
 			in := review.Report{Summary: "initial", Findings: tt.findings}
 
@@ -200,6 +205,52 @@ func TestCritique(t *testing.T) {
 					t.Errorf("Findings[%d].CritiqueReason = %q, want it to contain %q",
 						i, got.Findings[i].CritiqueReason, want)
 				}
+			}
+		})
+	}
+}
+
+// TestCritiqueGenerateFailureAborts 锁住"基础设施失败要上抛"这条语义：
+// Generate 报错跟意见本身无关，不能被固化成"复核未能完成"写进报告——那样
+// 这条意见就永远失去被真正复核的机会了。上抛之后 engine.Run 会让运行留在
+// in_progress，下次重跑只重跑复核。
+func TestCritiqueGenerateFailureAborts(t *testing.T) {
+	tests := []struct {
+		name     string
+		findings []review.Finding
+		failIf   func(string) error
+	}{
+		{
+			name:     "one finding's provider failure aborts the whole critique",
+			findings: findingsNamed("fine", "explodes"),
+			failIf: func(msg string) error {
+				if strings.Contains(msg, "explodes") {
+					return errors.New("provider is down")
+				}
+				return nil
+			},
+		},
+		{
+			name:     "the only finding failing aborts too",
+			findings: findingsNamed("explodes"),
+			failIf:   func(string) error { return errors.New("provider is down") },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &verdictProvider{failIf: tt.failIf}
+			deps := CritiqueDeps{LLM: llm, Tools: critiqueTestTools(), RepoRoot: t.TempDir(), Concurrency: 4}
+
+			_, err := Critique(context.Background(), deps, review.Report{Findings: tt.findings}, critiqueTestChanges())
+			if err == nil {
+				t.Fatal("Critique() error = nil, want the provider failure to abort the critique")
+			}
+			if !strings.Contains(err.Error(), "provider is down") {
+				t.Errorf("error %q does not mention the underlying cause", err)
+			}
+			if !isRecoverable(err) {
+				t.Errorf("error %q is not marked recoverable; engine.Run relies on that to keep the run resumable", err)
 			}
 		})
 	}
