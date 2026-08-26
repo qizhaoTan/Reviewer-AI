@@ -35,19 +35,71 @@ git add -A
 
 ## 安装
 
+需要 Go 1.25+。
+
+### 方式一：`go install`（推荐）
+
 ```bash
 go install github.com/qizhaoTan/Reviewer-AI/cmd/reviewer-ai@latest
 ```
 
-或从源码构建（产物为 `cr`）：
+装出来的二进制叫 `reviewer-ai`（Go 取的是包目录名），本文档统一用短名 `cr`。改名：
+
+```bash
+# macOS / Linux
+mv "$(go env GOPATH)/bin/reviewer-ai" "$(go env GOPATH)/bin/cr"
+```
+
+```powershell
+# Windows (PowerShell)
+Move-Item "$(go env GOPATH)\bin\reviewer-ai.exe" "$(go env GOPATH)\bin\cr.exe"
+```
+
+想同时保留两个名字，就把 `mv` / `Move-Item` 换成 `ln -s` / 复制。
+
+### 方式二：从源码构建
+
+Makefile 里已经把产物名写成了 `cr`，构建完直接拿到正确的名字：
 
 ```bash
 git clone https://github.com/qizhaoTan/Reviewer-AI.git
 cd Reviewer-AI
-make            # 等价于 make regenerate，产出 ./cr
+make                       # 等价于 make regenerate，产出 ./cr
+sudo mv cr /usr/local/bin/ # 放进 PATH（macOS / Linux）
 ```
 
-需要 Go 1.25+。
+`/usr/local/bin` 通常已经在 PATH 里，这样装完就能直接用。不想动系统目录的话，放到 `~/bin` 之类的自有目录，然后按下一节配置 PATH。
+
+### 把可执行文件加入 PATH
+
+`go install` 的产物默认落在 `$(go env GOPATH)/bin`（一般是 `~/go/bin`），这个目录**不一定**在 PATH 里。先验证：
+
+```bash
+cr version
+```
+
+能打印版本号就说明已经配好，可以跳过本节。如果提示 `command not found`，按你的 shell 追加配置：
+
+```bash
+# zsh（macOS 默认）
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc
+source ~/.zshrc
+
+# bash
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+```powershell
+# Windows (PowerShell)，仅当前用户，重开终端生效
+$gobin = "$(go env GOPATH)\bin"
+[Environment]::SetEnvironmentVariable(
+  "Path",
+  [Environment]::GetEnvironmentVariable("Path", "User") + ";$gobin",
+  "User")
+```
+
+改完重新执行 `cr version` 验证。
 
 ## 配置
 
