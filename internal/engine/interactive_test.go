@@ -353,3 +353,85 @@ func TestInteractiveRereviewPropagatesLoadError(t *testing.T) {
 		})
 	}
 }
+
+func TestInteractiveRereviewAutoStage(t *testing.T) {
+	tests := []struct {
+		name string
+		// autoStage 对应配置里的 auto_stage。
+		autoStage bool
+		// stageErr 是注入的 StageAll 失败。
+		stageErr error
+		// wantStaged 是期望 StageAll 被调用的次数。
+		wantStaged int
+		wantErr    string
+	}{
+		{
+			name:       "disabled leaves the index untouched",
+			autoStage:  false,
+			wantStaged: 0,
+		},
+		{
+			name:       "enabled stages before snapshotting",
+			autoStage:  true,
+			wantStaged: 1,
+		},
+		{
+			// stage 失败必须中断：接着跑只会拿到一份用户以为已经更新、
+			// 实际是旧的暂存区，静默审错东西比报错更糟。
+			name:       "stage failure aborts the re-review",
+			autoStage:  true,
+			stageErr:   errors.New("not a git repository"),
+			wantStaged: 1,
+			wantErr:    "auto-stage",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			base := baseRun(repo)
+
+			llm := &reviewThenCritiqueProvider{fakeProvider: fakeProvider{script: []schema.Message{
+				submitCall("c1", "重审结果", map[string]any{"file": "config.go", "severity": "error", "summary": "还有问题"}),
+			}}}
+			i := newInteractive(t, llm, base)
+			i.AutoStage = tt.autoStage
+
+			var staged int
+			var stagedBeforeLoad bool
+			i.StageAll = func(context.Context, string) error {
+				staged++
+				return tt.stageErr
+			}
+			i.LoadStaged = func(context.Context, string) ([]gitdiff.Change, error) {
+				stagedBeforeLoad = staged > 0
+				return []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch + "\n// fixed\n"}}, nil
+			}
+
+			_, err := i.Rereview(context.Background(), "run-base")
+
+			if staged != tt.wantStaged {
+				t.Errorf("StageAll called %d times, want %d", staged, tt.wantStaged)
+			}
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Rereview() error = nil, want one containing %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				if tt.stageErr != nil && !errors.Is(err, tt.stageErr) {
+					t.Errorf("error = %v, want it to wrap %v", err, tt.stageErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Rereview() error = %v", err)
+			}
+			// stage 必须发生在采集快照之前，否则等于没 stage。
+			if tt.autoStage && !stagedBeforeLoad {
+				t.Error("StageAll ran after LoadStaged; it must stage before the snapshot is taken")
+			}
+		})
+	}
+}

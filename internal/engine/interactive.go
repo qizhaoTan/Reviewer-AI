@@ -36,6 +36,15 @@ type Interactive struct {
 	// 做成字段而不是直接调 gitdiff.LoadStaged，是为了测试能注入一份固定的
 	// 快照，不必真的建一个 git 仓库。
 	LoadStaged func(ctx context.Context, repoDir string) ([]gitdiff.Change, error)
+
+	// AutoStage 为 true 时，增量重审在采集快照之前先把工作区的改动全部
+	// stage 一次（对应配置里的 auto_stage）。重审按钮的语义就是"我已按意见
+	// 改完"，让用户先手动 add 一次是多余的一步。
+	AutoStage bool
+
+	// StageAll 执行自动 stage，仅在 AutoStage 为 true 时调用。
+	// 与 LoadStaged 同理做成字段，方便测试注入。
+	StageAll func(ctx context.Context, repoDir string) error
 }
 
 // Reply 就用户对 findingID 这条意见的异议跑一次对话，把结论与讨论记录落盘。
@@ -102,6 +111,11 @@ func (i *Interactive) Rereview(ctx context.Context, runID string) (*store.Run, e
 	}
 
 	repoAbs, branch := splitRunKey(base.RepoPath)
+	if i.AutoStage {
+		if err := i.stageAll(ctx, repoAbs); err != nil {
+			return nil, fmt.Errorf("auto-stage changes in %s: %w", repoAbs, err)
+		}
+	}
 	current, err := i.loadStaged(ctx, repoAbs)
 	if err != nil {
 		return nil, fmt.Errorf("load staged changes for %s: %w", repoAbs, err)
@@ -198,6 +212,13 @@ func (i *Interactive) loadStaged(ctx context.Context, repoDir string) ([]gitdiff
 		return i.LoadStaged(ctx, repoDir)
 	}
 	return gitdiff.LoadStaged(ctx, repoDir)
+}
+
+func (i *Interactive) stageAll(ctx context.Context, repoDir string) error {
+	if i.StageAll != nil {
+		return i.StageAll(ctx, repoDir)
+	}
+	return gitdiff.StageAll(ctx, repoDir)
 }
 
 // defaultInteractiveTimeout 只在调用方没有填 Timeout 时兜底。

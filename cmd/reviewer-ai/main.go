@@ -254,5 +254,6 @@ func buildInteractive(configPath string) (*engine.Interactive, error) {
 		Deps:       deps,
 		ReplyTools: append(readOnlyTools(), tool.WithdrawFindingTool{}),
 		Timeout:    modelCfg.Timeout(),
+		AutoStage:  cfgFile.AutoStage,
 	}, nil
 }
