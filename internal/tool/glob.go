@@ -125,7 +125,8 @@ func globWithRipgrep(repoRoot, pattern string, noIgnore bool) ([]string, error) 
 
 	err := cmd.Run()
 	// ripgrep 退出码：0=有匹配，1=无匹配（正常，视为空结果），2=用法错误。
-	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		if exitErr.ExitCode() == 1 {
 			return nil, nil
 		}

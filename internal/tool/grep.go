@@ -177,7 +177,8 @@ func grepWithRipgrep(repoRoot, pattern, glob, mode string, noIgnore bool) ([]gre
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		if exitErr.ExitCode() == 1 {
 			return nil, nil
 		}

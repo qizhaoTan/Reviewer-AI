@@ -1,3 +1,13 @@
 .idea
 bin/
 cr
+
+# 本地分发配置（含主机地址，不入库）
+deploy.mk
+
+# Claude Code 个人本地设置
+.claude/settings.local.json
+
+# 内部规划文档，不公开
+docs/roadmap-v2.md
+docs/roadmap-v2-todo.md

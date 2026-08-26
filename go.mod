@@ -1,6 +1,6 @@
 module github.com/qizhaoTan/Reviewer-AI
 
-go 1.26.0
+go 1.25.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0
