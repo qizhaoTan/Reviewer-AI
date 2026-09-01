@@ -133,7 +133,8 @@ $gobin = "$(go env GOPATH)\bin"
     "concurrency": 4,
     "max_turns": 12
   },
-  "auto_stage": true
+  "auto_stage": true,
+  "language_prompt": "- Your response needs to be in Chinese!!!（你的回复必须使用中文）"
 }
 ```
 
@@ -144,7 +145,7 @@ $gobin = "$(go env GOPATH)\bin"
 | `critique.concurrency` | 复核阶段的并发数。 |
 | `critique.max_turns` | 单条意见复核时允许的最大工具调用轮数。 |
 | `auto_stage` | 为 true 时审查前自动 `git add -A`。 |
-| `language_prompt` | 可选，覆盖默认的输出语言指令。 |
+| `language_prompt` | 可选，覆盖默认的输出语言指令，整段照抄进 system prompt 末尾。不写时用默认值 `- Your response needs to be in Chinese!!!（你的回复必须使用中文）`；显式配成空字符串 `""` 表示不加任何语言约束，由模型自己决定语言。 |
 
 ## 使用
 
