@@ -29,8 +29,9 @@ mac-arm:
 
 cross: win linux mac mac-arm
 
-# DIST_TARGETS / UPLOAD_TARGETS 形如 "scp-选项:user@host:/目标路径"，多个用空格分隔，
-# 在 deploy.mk 里定义。未定义时这两个 target 直接提示而不做任何事。
+# DIST_TARGETS / UPLOAD_TARGETS 形如 "user@host:/目标路径"，多个用空格分隔，
+# 在 deploy.mk 里定义；需要非标端口等 scp 额外参数时用 SCP_FLAGS（对所有目标统一生效）。
+# 未定义时这两个 target 直接提示而不做任何事。
 dist: cross
 	@if [ -z "$(DIST_TARGETS)" ]; then \
 		echo "未配置 DIST_TARGETS，请参考 deploy.mk.example 创建 deploy.mk"; exit 1; \
