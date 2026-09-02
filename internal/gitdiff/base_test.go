@@ -320,6 +320,88 @@ func TestWorkTreeDirtyPaths(t *testing.T) {
 	}
 }
 
+func TestWorkTreeModifiedPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(*testing.T, string)
+		want    []string
+	}{
+		{
+			name:    "clean work tree reports nothing",
+			arrange: func(*testing.T, string) {},
+			want:    nil,
+		},
+		{
+			// 与 WorkTreeDirtyPaths 结论相反的那一条，也是这个函数存在的理由：
+			// 文件已 git add，工作区和索引一致，anchor 读全文是安全的。
+			name: "staged modification is not reported",
+			arrange: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "a.go"), "package sample\n\nconst staged = true\n")
+				runGit(t, repo, "add", "a.go")
+			},
+			want: nil,
+		},
+		{
+			name: "unstaged modification is reported",
+			arrange: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "a.go"), "package sample\n\nconst changed = true\n")
+			},
+			want: []string{"a.go"},
+		},
+		{
+			// git add 之后又接着改：索引里是一版，工作区是另一版，读全文会读到
+			// diff 没描述的那一版。
+			name: "modification on top of a staged change is reported",
+			arrange: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "a.go"), "package sample\n\nconst staged = true\n")
+				runGit(t, repo, "add", "a.go")
+				writeFile(t, filepath.Join(repo, "a.go"), "package sample\n\nconst later = true\n")
+			},
+			want: []string{"a.go"},
+		},
+		{
+			name: "untracked file is reported",
+			arrange: func(t *testing.T, repo string) {
+				writeFile(t, filepath.Join(repo, "new.go"), "package sample\n")
+			},
+			want: []string{"new.go"},
+		},
+		{
+			name: "deleted file is reported",
+			arrange: func(t *testing.T, repo string) {
+				if err := os.Remove(filepath.Join(repo, "a.go")); err != nil {
+					t.Fatalf("remove a.go: %v", err)
+				}
+			},
+			want: []string{"a.go"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newRepo(t)
+			writeFile(t, filepath.Join(repo, "a.go"), "package sample\n")
+			runGit(t, repo, "add", "a.go")
+			runGit(t, repo, "commit", "-m", "initial")
+			tt.arrange(t, repo)
+
+			got, err := WorkTreeModifiedPaths(context.Background(), repo)
+			if err != nil {
+				t.Fatalf("WorkTreeModifiedPaths() error = %v", err)
+			}
+			sort.Strings(got)
+			if len(got) != len(tt.want) {
+				t.Fatalf("WorkTreeModifiedPaths() = %v, want %v", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if got[i] != want {
+					t.Errorf("WorkTreeModifiedPaths()[%d] = %q, want %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
 func TestMergeConflicts(t *testing.T) {
 	tests := []struct {
 		name    string

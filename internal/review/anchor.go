@@ -6,8 +6,17 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
 )
 
+// FileReader 按仓库相对路径取一个文件的完整内容，取不到时返回 ok=false。
+//
+// 这是 ResolveAnchors 的二级定位数据源，做成函数类型而不是让 review 包直接读
+// 磁盘，是为了把两件事留在调用方：一是 IO 与错误处理，二是**判断这个文件现在
+// 能不能读**。后者没有普适答案——`-base` 模式要求工作区干净，文件随便读；
+// 暂存区模式下工作区可能领先于索引，读到的就不是 diff 描述的那个版本。这个
+// 策略差异属于命令行入口，不该渗进 review 包。
+type FileReader func(path string) ([]byte, bool)
+
 // ResolveAnchors 用确定性算法把每条 Finding 的 Anchor（模型逐字引用的代码片段）
-// 贴回对应文件的 diff，算出真实行号，填进 StartLine/EndLine。
+// 贴回源码，算出真实行号，填进 StartLine/EndLine。
 //
 // 为什么不让模型直接给行号：模型看到的是 unified diff，行号藏在 "@@ -12,7 +12,9 @@"
 // 里，要得出某一行在新文件中的位置，模型必须从 hunk 起点逐行累加、跳过删除行——
@@ -15,12 +24,21 @@ import (
 // "逐字复制一段它正在评论的代码"是模型很擅长的事，把计数交给这里的确定性算法，
 // 各自做各自擅长的部分。
 //
-// 定位失败不是错误：Anchor 匹配不上时 StartLine/EndLine 保持 0，该 Finding 退化为
+// 定位分两级：先在 diff 里找，找不到再用 readFile 读整个文件找。
+//
+// 之所以需要第二级：hunk 只带前后各 3 行上下文，而模型常常是先用 read_file 读到
+// 完整函数、再从那里抄 anchor 的，抄进来的行很容易落在这 3 行之外——那些行在
+// diff 里压根不存在，改多少匹配算法都救不回来。读全文顺带解决了 anchor 横跨多个
+// hunk 的情况：文件里没有 hunk 边界这回事。
+//
+// readFile 为 nil 表示不启用第二级，此时行为与只在 diff 内定位完全一致。
+//
+// 定位失败不是错误：两级都匹配不上时 StartLine/EndLine 保持 0，该 Finding 退化为
 // 文件级意见照常保留。一条意见的价值在于它指出的问题，不在于坐标——因为定位不到
 // 就丢掉整条意见是本末倒置。
 //
 // 返回新切片，不修改入参。
-func ResolveAnchors(findings []Finding, changes []gitdiff.Change) []Finding {
+func ResolveAnchors(findings []Finding, changes []gitdiff.Change, readFile FileReader) []Finding {
 	if len(findings) == 0 {
 		return findings
 	}
@@ -43,9 +61,42 @@ func ResolveAnchors(findings []Finding, changes []gitdiff.Change) []Finding {
 		if start, end, found := resolveAnchor(patch, out[i].Anchor); found {
 			out[i].StartLine = start
 			out[i].EndLine = end
+			continue
+		}
+		if readFile == nil {
+			continue
+		}
+		content, ok := readFile(out[i].File)
+		if !ok {
+			continue
+		}
+		if start, end, found := resolveAnchorInFile(string(content), out[i].Anchor); found {
+			out[i].StartLine = start
+			out[i].EndLine = end
 		}
 	}
 	return out
+}
+
+// resolveAnchorInFile 在文件全文里定位 anchor，返回 1-based 起止行号。
+//
+// 和 resolveAnchor 共用同一套归一化与滑窗逻辑，差别只在数据来源：这里没有
+// hunk、没有新旧两侧，就是文件从第 1 行铺到最后一行。
+func resolveAnchorInFile(content, anchor string) (startLine, endLine int, found bool) {
+	target := splitAndNormalize(anchor)
+	if len(target) == 0 {
+		return 0, 0, false
+	}
+
+	raw := strings.Split(content, "\n")
+	lines := make([]indexedLine, 0, len(raw))
+	for i, l := range raw {
+		// 空行同样不进匹配序列，但行号照常推进——理由见 extractSideLines。
+		if n := normalizeLine(l); n != "" {
+			lines = append(lines, indexedLine{i + 1, n})
+		}
+	}
+	return matchConsecutive(lines, target)
 }
 
 // resolveAnchor 在 patch 中定位 anchor，返回新文件坐标系下的起止行号。

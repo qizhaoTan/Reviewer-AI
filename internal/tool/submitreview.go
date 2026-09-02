@@ -37,6 +37,14 @@ type SubmitReviewTool struct {
 	//
 	// 本次审查期间它固定不变且只读，因此可以被所有 Agent 安全共享。
 	Changes []gitdiff.Change
+
+	// ReadFile 是 anchor 定位的二级数据源：diff 里找不到时用它读文件全文再找。
+	// 必要性在于 hunk 只带 3 行上下文，而模型往往是从 read_file 的完整输出里
+	// 抄 anchor 的，抄到 3 行之外的代码在 diff 里根本不存在。
+	//
+	// 留空表示只在 diff 内定位。装配方按审查模式决定填不填——见
+	// cmd/reviewer-ai/main.go 的 anchorFileReader。
+	ReadFile review.FileReader
 }
 
 func (t SubmitReviewTool) Definition() schema.ToolDefinition {
@@ -118,7 +126,7 @@ func (t SubmitReviewTool) Execute(_ context.Context, _ string, args json.RawMess
 
 	// 行号在这里算出来，而不是留给调用方：Changes 就在手边，晚一步算就多一处
 	// 可能忘记调用 ResolveAnchors 的地方，Finding 也就可能带着空行号流向下游。
-	normalized.Findings = review.ResolveAnchors(normalized.Findings, t.Changes)
+	normalized.Findings = review.ResolveAnchors(normalized.Findings, t.Changes, t.ReadFile)
 
 	return Result{
 		Output:       fmt.Sprintf("审查结果已提交：记录了 %d 条意见。", len(normalized.Findings)),

@@ -61,6 +61,33 @@ index 1234567..89abcde 100644
  }
 `
 
+// twoHunkPatch / twoHunkFile 演示"一个文件被切成两个 hunk"：两处改动隔得远，
+// 中间那段没改的代码超出了 3 行上下文，因此完全不在 diff 里。
+//
+// twoHunkFile 的行号：1 start() / 2 first() / 3-6 pad1..pad4 / 7 last() / 8 end()
+// 两个 hunk 分别覆盖 1-2 行与 7-8 行，中间的 pad2/pad3 两行两侧都没有。
+const twoHunkPatch = `diff --git a/split.go b/split.go
+index 1234567..89abcde 100644
+--- a/split.go
++++ b/split.go
+@@ -1,1 +1,2 @@ package split
+ start()
++	first()
+@@ -6,1 +7,2 @@ package split
++	last()
+ end()
+`
+
+const twoHunkFile = `start()
+	first()
+	pad1()
+	pad2()
+	pad3()
+	pad4()
+	last()
+end()
+`
+
 // deletionPatch 只删不增，用于验证"意见针对被删掉的代码"时退到旧文件侧定位。
 // 旧文件侧行号：20 = "func Deprecated() {"，21 = "	panic(\"unused\")"，22 = "}"
 const deletionPatch = `--- a/old.go
@@ -215,13 +242,107 @@ func TestResolveAnchors(t *testing.T) {
 		{Status: "M", Path: "config.go", Patch: samplePatch},
 	}
 
+	// fileContent 是 config.go 的"完整文件"，比 samplePatch 那个 hunk 多出前后
+	// 各若干行——正是模型用 read_file 能看到、而 diff 里不存在的那部分。
+	// 行号推演：第 1 行 package config ... 第 10 行 func Load ... 第 16 行 return &f, nil
+	const fileContent = `package config
+
+import "os"
+
+type File struct {
+	Name string
+}
+
+// Load reads the config file.
+func Load(path string) (*File, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f File
+	return &f, nil
+}
+`
+	readConfigGo := func(path string) ([]byte, bool) {
+		if path != "config.go" {
+			return nil, false
+		}
+		return []byte(fileContent), true
+	}
+
 	tests := []struct {
 		name     string
 		findings []Finding
 		changes  []gitdiff.Change
+		// readFile 为 nil 时只在 diff 内定位，等价于没有二级回退。
+		readFile FileReader
 		// wantLines 是每条 finding 期望的 [start, end]。
 		wantLines [][2]int
 	}{
+		{
+			// hunk 只带 3 行上下文，import/type 这些行在 diff 里根本不存在，
+			// 只有读全文才定位得到。
+			name: "anchor outside the hunk resolves by reading the file",
+			findings: []Finding{
+				{ID: "f1", File: "config.go", Anchor: "type File struct {\n\tName string\n}"},
+			},
+			changes:   changes,
+			readFile:  readConfigGo,
+			wantLines: [][2]int{{5, 7}},
+		},
+		{
+			name: "diff match still wins over the file fallback",
+			findings: []Finding{
+				{ID: "f1", File: "config.go", Anchor: "return nil, err"},
+			},
+			changes:   changes,
+			readFile:  readConfigGo,
+			wantLines: [][2]int{{13, 13}},
+		},
+		{
+			name: "anchor outside the hunk stays unresolved without a reader",
+			findings: []Finding{
+				{ID: "f1", File: "config.go", Anchor: "type File struct {\n\tName string\n}"},
+			},
+			changes:   changes,
+			wantLines: [][2]int{{0, 0}},
+		},
+		{
+			// reader 拒绝读（文件在工作区被改过、或读失败）时保持 0，不猜。
+			name: "reader refusing the file leaves the finding unresolved",
+			findings: []Finding{
+				{ID: "f1", File: "config.go", Anchor: "type File struct {"},
+			},
+			changes:   changes,
+			readFile:  func(string) ([]byte, bool) { return nil, false },
+			wantLines: [][2]int{{0, 0}},
+		},
+		{
+			name: "anchor absent from both diff and file stays unresolved",
+			findings: []Finding{
+				{ID: "f1", File: "config.go", Anchor: "func NeverExisted() {}"},
+			},
+			changes:   changes,
+			readFile:  readConfigGo,
+			wantLines: [][2]int{{0, 0}},
+		},
+		{
+			// 两处改动隔得远，git 把它们切成两个 hunk，中间那段没改的代码不在
+			// diff 里。横跨两个 hunk 的 anchor 在任何单个 hunk 内都凑不齐，
+			// 读全文才连得起来——这也是不必再单独实现"跨 hunk 拼接"的原因。
+			name: "anchor spanning two hunks resolves by reading the file",
+			findings: []Finding{
+				{ID: "f1", File: "split.go", Anchor: "first()\npad1()\npad2()\npad3()\npad4()\nlast()"},
+			},
+			changes: []gitdiff.Change{{Status: "M", Path: "split.go", Patch: twoHunkPatch}},
+			readFile: func(path string) ([]byte, bool) {
+				if path != "split.go" {
+					return nil, false
+				}
+				return []byte(twoHunkFile), true
+			},
+			wantLines: [][2]int{{2, 7}},
+		},
 		{
 			name: "resolves matching anchors and leaves the rest at zero",
 			findings: []Finding{
@@ -256,7 +377,7 @@ func TestResolveAnchors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveAnchors(tt.findings, tt.changes)
+			got := ResolveAnchors(tt.findings, tt.changes, tt.readFile)
 			if len(got) != len(tt.wantLines) {
 				t.Fatalf("len(ResolveAnchors()) = %d, want %d", len(got), len(tt.wantLines))
 			}
@@ -274,7 +395,7 @@ func TestResolveAnchorsDoesNotMutateInput(t *testing.T) {
 	changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: samplePatch}}
 	findings := []Finding{{ID: "f1", File: "config.go", Anchor: "return nil, err"}}
 
-	got := ResolveAnchors(findings, changes)
+	got := ResolveAnchors(findings, changes, nil)
 
 	if findings[0].StartLine != 0 || findings[0].EndLine != 0 {
 		t.Errorf("input finding was mutated: StartLine/EndLine = %d/%d, want 0/0",

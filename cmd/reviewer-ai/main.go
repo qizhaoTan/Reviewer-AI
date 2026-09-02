@@ -192,7 +192,7 @@ func runReview(args []string) {
 	}
 	defer db.Close()
 
-	deps, err := buildDeps(cfgFile, modelCfg, changes)
+	deps, err := buildDeps(cfgFile, modelCfg, changes, anchorFileReader(ctx, repoAbs))
 	if err != nil {
 		fail("%v", err)
 	}
@@ -205,6 +205,51 @@ func runReview(args []string) {
 	}
 
 	fmt.Print(review.Render(run.Report()))
+}
+
+// anchorFileReader 构造 anchor 定位的二级数据源：diff 里定位不到时，读文件全文
+// 再找一次。必要性在于 hunk 只带前后 3 行上下文，而模型常常从 read_file 的完整
+// 输出里抄 anchor，抄到 3 行之外的代码在 diff 里根本不存在。
+//
+// 判据只有一条，两种审查模式共用：工作区里的这个文件，还是 diff 描述的那一份吗？
+// 工作区一旦领先于索引（改了但没 git add），读到的就是另一个版本，算出来的行号会
+// 指向错误的位置。这类文件一律不读，宁可没有行号——行号错得离谱比没有行号更有害，
+// 因为它看起来是对的。
+//
+// 不必为 -base 模式单开分支：那条路径的 checkBaseReviewable 已经强制工作区干净，
+// WorkTreeModifiedPaths 自然返回空，同一段逻辑得出同样的结论。
+//
+// 拿不到状态时返回 nil（整体关闭二级定位）而不是让审查失败：定位是锦上添花，
+// 不该因为它把整次审查搞挂。
+func anchorFileReader(ctx context.Context, repoAbs string) review.FileReader {
+	modified, err := gitdiff.WorkTreeModifiedPaths(ctx, repoAbs)
+	if err != nil {
+		return nil
+	}
+	skip := make(map[string]struct{}, len(modified))
+	for _, p := range modified {
+		skip[p] = struct{}{}
+	}
+
+	return func(path string) ([]byte, bool) {
+		if _, dirty := skip[path]; dirty {
+			return nil, false
+		}
+		// 路径由模型提供。submit_review 已经校验过它属于本次改动，这里再挡一道
+		// 是纵深防御：这个闭包直接读磁盘，不该把安全性寄托在上游校验没被绕过。
+		if path == "" || filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
+			return nil, false
+		}
+		full := filepath.Join(repoAbs, filepath.Clean(path))
+		if !strings.HasPrefix(full, repoAbs+string(filepath.Separator)) {
+			return nil, false
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			return nil, false
+		}
+		return data, true
+	}
 }
 
 // checkBaseReviewable 在按 base 审查之前做两项前置校验。
@@ -279,14 +324,14 @@ func readOnlyTools() []tool.ITool {
 //
 // 收尾工具三个阶段各不相同：初审用 submit_review 提交意见，复核用
 // submit_verdict 给单条意见下裁决，reply 用 withdraw_finding 撤回。
-func buildDeps(cfgFile *config.File, modelCfg config.ModelConfig, changes []gitdiff.Change) (engine.Deps, error) {
+func buildDeps(cfgFile *config.File, modelCfg config.ModelConfig, changes []gitdiff.Change, readFile review.FileReader) (engine.Deps, error) {
 	llm, err := provider.New(modelCfg.ToProviderConfig())
 	if err != nil {
 		return engine.Deps{}, fmt.Errorf("create provider: %w", err)
 	}
 	return engine.Deps{
 		LLM:                 llm,
-		Tools:               append(readOnlyTools(), tool.SubmitReviewTool{Changes: changes}),
+		Tools:               append(readOnlyTools(), tool.SubmitReviewTool{Changes: changes, ReadFile: readFile}),
 		CritiqueTools:       append(readOnlyTools(), tool.CritiqueVerdictTool{}),
 		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
 		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
@@ -317,7 +362,11 @@ func buildInteractive(configPath string) (*engine.Interactive, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve model config: %w", err)
 	}
-	deps, err := buildDeps(cfgFile, modelCfg, nil)
+	// readFile 传 nil：Web 服务同时面向多个仓库，装配这一刻还不知道待会儿要重审
+	// 哪一个，拿不到 repoAbs 就构造不出 reader。代价是 Web 侧增量重审只能在 diff
+	// 内定位 anchor，落到 hunk 外的 anchor 会退化成文件级意见。要补的话得让
+	// engine 在 Run 时按 repoRoot 现场构造 reader，而不是在这里预先装配。
+	deps, err := buildDeps(cfgFile, modelCfg, nil, nil)
 	if err != nil {
 		return nil, err
 	}

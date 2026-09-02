@@ -88,6 +88,38 @@ func WorkTreeDirtyPaths(ctx context.Context, repoDir string) ([]string, error) {
 	return paths, nil
 }
 
+// WorkTreeModifiedPaths 返回工作区内容偏离**索引**的路径（含未跟踪文件），
+// 一致时返回空切片。
+//
+// 与 WorkTreeDirtyPaths 的区别在于比较对象：那个比的是 HEAD，会把所有已暂存
+// 的文件都算成"脏"；这个只比索引，回答的是另一个问题——"工作区里的这个文件，
+// 还是暂存区里那一份吗？"
+//
+// 用途是给 anchor 定位判断某个文件能不能安全地读全文：暂存区审查的 diff 描述
+// 的是索引，工作区一旦领先于索引，读到的就是另一个版本，据此算出的行号会指向
+// 错误的位置。行号错得离谱，比干脆没有行号更有害。
+func WorkTreeModifiedPaths(ctx context.Context, repoDir string) ([]string, error) {
+	out, err := git(ctx, repoDir, "status", "--porcelain", "-z", "--untracked-files=normal")
+	if err != nil {
+		return nil, fmt.Errorf("check work tree status: %w", err)
+	}
+
+	var paths []string
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		// porcelain 的每条记录形如 "XY <path>"：X 是索引相对 HEAD 的状态，
+		// Y 是工作区相对索引的状态。只有 Y 非空格才说明工作区领先于索引。
+		// 未跟踪文件是 "??"，Y 为 '?'，同样落入这里——它压根不在索引里。
+		if len(entry) < 4 {
+			continue
+		}
+		if entry[1] == ' ' {
+			continue
+		}
+		paths = append(paths, string(bytes.TrimLeft(entry[2:], " ")))
+	}
+	return paths, nil
+}
+
 // ErrMergeTreeUnsupported 表示当前 git 版本没有只读的 `merge-tree --write-tree`
 // （2.38 之前的形式不同，输出也无法可靠解析）。调用方应当据此跳过冲突检测，
 // 而不是让审查失败——git 版本旧不该让整个功能不可用。
