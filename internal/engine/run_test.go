@@ -219,7 +219,7 @@ func TestRun(t *testing.T) {
 			deps, db := newTestDeps(t, llm, changes)
 			repoAbs := t.TempDir()
 
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 
 			if tt.wantErrContains != "" {
 				if err == nil {
@@ -264,7 +264,7 @@ func TestRunExposesSubmitReviewToTheModel(t *testing.T) {
 			llm := &fakeProvider{script: []schema.Message{submitCall("tc1", "fine")}}
 			deps, _ := newTestDeps(t, llm, changes)
 
-			if _, err := Run(context.Background(), deps, t.TempDir(), "main", changes, time.Minute); err != nil {
+			if _, err := Run(context.Background(), deps, t.TempDir(), "main", "", changes, time.Minute); err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
 
@@ -310,7 +310,7 @@ func TestRunGenerateFailureStaysResumable(t *testing.T) {
 			deps, db := newTestDeps(t, llm, changes)
 			repoAbs := t.TempDir()
 
-			_, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			_, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err == nil {
 				t.Fatal("Run() error = nil, want the provider failure to surface")
 			}
@@ -353,7 +353,7 @@ func TestRunResumesAfterGenerateFailure(t *testing.T) {
 				errAt:  1,
 			}
 			deps, db := newTestDeps(t, failing, changes)
-			if _, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute); err == nil {
+			if _, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute); err == nil {
 				t.Fatal("first Run() error = nil, want the provider failure to surface")
 			}
 			first := latestRun(t, db, repoAbs, "main")
@@ -362,7 +362,7 @@ func TestRunResumesAfterGenerateFailure(t *testing.T) {
 			// 第二趟：换一个正常的 provider，复用同一个 store。
 			deps.LLM = &fakeProvider{script: []schema.Message{submitCall("tc3", "done",
 				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "swallowed error"})}}
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("second Run() error = %v", err)
 			}
@@ -382,7 +382,7 @@ func TestRunResumesAfterGenerateFailure(t *testing.T) {
 				t.Errorf("len(Findings) = %d, want 1", got)
 			}
 
-			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main"), 10)
+			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main", ""), 10)
 			if err != nil {
 				t.Fatalf("ListRuns: %v", err)
 			}
@@ -417,7 +417,7 @@ func TestRunFreshIgnoresResumableRun(t *testing.T) {
 				errAt:  1,
 			}
 			deps, db := newTestDeps(t, seeding, changes)
-			if _, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute); err == nil {
+			if _, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute); err == nil {
 				t.Fatal("seeding Run() error = nil, want the provider failure to surface")
 			}
 			seeded := latestRun(t, db, repoAbs, "main")
@@ -431,7 +431,7 @@ func TestRunFreshIgnoresResumableRun(t *testing.T) {
 			deps.LLM = &fakeProvider{script: []schema.Message{submitCall("tc3", "done",
 				map[string]any{"file": "config.go", "anchor": "return nil, err", "severity": "error", "summary": "swallowed error"})}}
 			deps.Fresh = true
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -443,7 +443,7 @@ func TestRunFreshIgnoresResumableRun(t *testing.T) {
 				t.Errorf("Status = %q, want %q", run.Status, store.StatusCompleted)
 			}
 
-			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main"), 10)
+			runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, "main", ""), 10)
 			if err != nil {
 				t.Fatalf("ListRuns: %v", err)
 			}
@@ -457,7 +457,7 @@ func TestRunFreshIgnoresResumableRun(t *testing.T) {
 // latestRun 取出 repoAbs/branch 对应的最近一条记录。
 func latestRun(t *testing.T, db *store.Store, repoAbs, branch string) store.Run {
 	t.Helper()
-	runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, branch), 10)
+	runs, err := db.ListRuns(context.Background(), buildRunKey(repoAbs, branch, ""), 10)
 	if err != nil {
 		t.Fatalf("ListRuns: %v", err)
 	}
@@ -548,7 +548,7 @@ func TestRunResumesAfterCritiqueFailure(t *testing.T) {
 			repoAbs := t.TempDir()
 
 			// 第一趟：初审跑完并落盘，复核炸掉。
-			_, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			_, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err == nil {
 				t.Fatal("first Run() error = nil, want the critique failure to surface")
 			}
@@ -572,7 +572,7 @@ func TestRunResumesAfterCritiqueFailure(t *testing.T) {
 			// 第二趟：复核恢复正常。初审脚本已经用尽，如果引擎错误地重跑初审，
 			// fakeProvider 会因为脚本耗尽而报错，这个用例就会失败。
 			llm.failCritique(nil)
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("second Run() error = %v", err)
 			}
@@ -633,7 +633,7 @@ func TestRunPersistsFindings(t *testing.T) {
 			deps := withCritique(base, changes)
 			repoAbs := t.TempDir()
 
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -681,14 +681,14 @@ func TestRunReusesPersistedFindingsOnCacheHit(t *testing.T) {
 			deps := withCritique(base, changes)
 			repoAbs := t.TempDir()
 
-			first, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			first, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("first Run() error = %v", err)
 			}
 			callsAfterFirst := llm.calls + int(llm.critiqueCalls.Load())
 
 			// 同样的内容再跑一次：应该完全命中缓存。
-			second, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			second, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("second Run() error = %v", err)
 			}
@@ -750,7 +750,7 @@ func TestRunResumesFromCritique(t *testing.T) {
 			// 预置一条初审已完成、复核未完成的记录。
 			seed := store.Run{
 				ID:       store.NewRunID(),
-				RepoPath: buildRunKey(repoAbs, "main"),
+				RepoPath: buildRunKey(repoAbs, "main", ""),
 				Status:   store.StatusInProgress,
 				Snapshot: changes,
 				Findings: tt.seedFindings,
@@ -760,7 +760,7 @@ func TestRunResumesFromCritique(t *testing.T) {
 				t.Fatalf("seed SaveRun: %v", err)
 			}
 
-			run, err := Run(context.Background(), deps, repoAbs, "main", changes, time.Minute)
+			run, err := Run(context.Background(), deps, repoAbs, "main", "", changes, time.Minute)
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}

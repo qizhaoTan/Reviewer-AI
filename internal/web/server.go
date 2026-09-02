@@ -99,6 +99,7 @@ type indexRow struct {
 	ID        string
 	RepoPath  string // 从 runKey 拆出的仓库路径
 	Branch    string // 从 runKey 拆出的分支名
+	BaseRev   string // 从 runKey 拆出的基准 revision，空表示这是一次暂存区审查
 	Status    store.RunStatus
 	UpdatedAt time.Time
 	Files     int // 本次审查覆盖的文件数
@@ -123,12 +124,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]indexRow, len(runs))
 	for i, run := range runs {
-		repoPath, branch := splitRunKey(run.RepoPath)
+		repoPath, branch, baseRev := splitRunKey(run.RepoPath)
 		kept, dropped := countFindings(run)
 		rows[i] = indexRow{
 			ID:        run.ID,
 			RepoPath:  repoPath,
 			Branch:    branch,
+			BaseRev:   baseRev,
 			Status:    run.Status,
 			UpdatedAt: run.UpdatedAt,
 			Files:     len(run.Snapshot),
@@ -184,15 +186,24 @@ func countFindings(run store.Run) (kept, dropped int) {
 	return kept, dropped
 }
 
-// splitRunKey 把引擎侧的 runKey（"仓库绝对路径#分支名"）拆回两段用于展示。
-// 找不到分隔符时整串当作仓库路径、分支留空——阶段一之前的旧记录存的就是
-// 裸路径，不该因为格式变了就显示不出来。
-func splitRunKey(key string) (repoPath, branch string) {
+// splitRunKey 把引擎侧的 runKey 拆成三段用于展示。形状有两种：
+// 暂存区审查是 "仓库绝对路径#分支名"，`-base` 审查在末尾多一段 "#base=基准"。
+//
+// 先剥 base 段再剥分支段：base 段有固定前缀能可靠识别，剥掉之后剩下的就是
+// 老形状。不先剥的话 "#base=dev" 会被当成分支名显示出来。
+//
+// 两段都找不到时整串当作仓库路径——阶段一之前的旧记录存的就是裸路径，
+// 不该因为格式变了就显示不出来。
+func splitRunKey(key string) (repoPath, branch, baseRev string) {
+	if idx := strings.LastIndex(key, "#base="); idx >= 0 {
+		baseRev = key[idx+len("#base="):]
+		key = key[:idx]
+	}
 	idx := strings.LastIndex(key, "#")
 	if idx < 0 {
-		return key, ""
+		return key, "", baseRev
 	}
-	return key[:idx], key[idx+1:]
+	return key[:idx], key[idx+1:], baseRev
 }
 
 // runPage 是详情页的数据。
@@ -201,6 +212,7 @@ type runPage struct {
 	// RepoPath / Branch 是 Run.RepoPath 拆开后的展示形式。
 	RepoPath string
 	Branch   string
+	BaseRev  string
 	// Kept / Dropped 把 Findings 按复核结论分成两组，让"复核到底过滤掉了
 	// 什么"在页面上一眼可见——这正是这个 Web 服务存在的主要理由。
 	//
@@ -241,9 +253,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repoPath, branch := splitRunKey(run.RepoPath)
+	repoPath, branch, baseRev := splitRunKey(run.RepoPath)
 	page := runPage{
-		Run: *run, RepoPath: repoPath, Branch: branch,
+		Run: *run, RepoPath: repoPath, Branch: branch, BaseRev: baseRev,
 		Interactive:          s.reviewer != nil,
 		ToolResultsCompacted: store.ToolResultsCompacted(),
 		Notice:               r.URL.Query().Get("notice"),

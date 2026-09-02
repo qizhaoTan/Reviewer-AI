@@ -65,6 +65,14 @@ type Run struct {
 	// 存 ID 而不是把上一条整个嵌进来：链可以很长，嵌套存储会让每条记录都
 	// 带上它全部祖先的副本，一次重审就把数据库撑大一倍。
 	ParentRunID string
+
+	// BaseRev 记录这次审查比较的基准 revision（`-base` 模式下用户传入的那个，
+	// 例如 "dev" 或 "origin/dev"）。为空表示这是一次暂存区审查。
+	//
+	// 存用户写的那个名字而不是解析后的 commit hash：增量重审要拿它重新算一次
+	// `base...HEAD`，而用户的意图是"跟 dev 的最新状态比"——存死 hash 会让重审
+	// 一直对着分支点那一刻的旧 dev，base 分支后来的推进就再也看不见了。
+	BaseRev string
 }
 
 // Report 把 Run 上的三个字段还原成一份 review.Report。
@@ -154,7 +162,8 @@ func migrate(db *sql.DB) error {
 			findings      TEXT    NOT NULL DEFAULT '[]',
 			summary       TEXT    NOT NULL DEFAULT '',
 			critiqued     INTEGER NOT NULL DEFAULT 0,
-			parent_run_id TEXT    NOT NULL DEFAULT ''
+			parent_run_id TEXT    NOT NULL DEFAULT '',
+			base_rev      TEXT    NOT NULL DEFAULT ''
 		);
 	`); err != nil {
 		return err
@@ -169,6 +178,7 @@ func migrate(db *sql.DB) error {
 		{"summary", `ALTER TABLE runs ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
 		{"critiqued", `ALTER TABLE runs ADD COLUMN critiqued INTEGER NOT NULL DEFAULT 0`},
 		{"parent_run_id", `ALTER TABLE runs ADD COLUMN parent_run_id TEXT NOT NULL DEFAULT ''`},
+		{"base_rev", `ALTER TABLE runs ADD COLUMN base_rev TEXT NOT NULL DEFAULT ''`},
 	} {
 		exists, err := columnExists(db, "runs", col.name)
 		if err != nil {
@@ -243,8 +253,8 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages, findings, summary, critiqued, parent_run_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runs (id, repo_path, status, created_at, updated_at, snapshot, snapshot_hash, messages, findings, summary, critiqued, parent_run_id, base_rev)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			status        = excluded.status,
 			updated_at    = excluded.updated_at,
@@ -254,10 +264,11 @@ func (s *Store) SaveRun(ctx context.Context, run Run) error {
 			findings      = excluded.findings,
 			summary       = excluded.summary,
 			critiqued     = excluded.critiqued,
-			parent_run_id = excluded.parent_run_id
+			parent_run_id = excluded.parent_run_id,
+			base_rev      = excluded.base_rev
 	`, run.ID, run.RepoPath, string(run.Status), createdAt.UnixNano(), now.UnixNano(),
 		string(snapshotJSON), snapshotHash, string(messagesJSON),
-		string(findingsJSON), run.Summary, run.Critiqued, run.ParentRunID)
+		string(findingsJSON), run.Summary, run.Critiqued, run.ParentRunID, run.BaseRev)
 	if err != nil {
 		return fmt.Errorf("save run %s: %w", run.ID, err)
 	}
@@ -418,7 +429,7 @@ func (s *Store) queryRuns(ctx context.Context, where string, limit int, args ...
 // runColumns 是所有查询共用的列清单，顺序必须与 scanRun 的 Scan 参数一一对应。
 // 抽成常量是因为之前四处 SELECT 各写一遍，加一列就要改四处，漏改一处就是
 // "列数对不上"的运行期错误。
-const runColumns = `id, repo_path, status, created_at, updated_at, snapshot, messages, findings, summary, critiqued, parent_run_id`
+const runColumns = `id, repo_path, status, created_at, updated_at, snapshot, messages, findings, summary, critiqued, parent_run_id, base_rev`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -430,7 +441,7 @@ func scanRun(row rowScanner) (*Run, error) {
 	var createdAt, updatedAt int64
 	var snapshotJSON, messagesJSON, findingsJSON string
 	if err := row.Scan(&run.ID, &run.RepoPath, &status, &createdAt, &updatedAt,
-		&snapshotJSON, &messagesJSON, &findingsJSON, &run.Summary, &run.Critiqued, &run.ParentRunID); err != nil {
+		&snapshotJSON, &messagesJSON, &findingsJSON, &run.Summary, &run.Critiqued, &run.ParentRunID, &run.BaseRev); err != nil {
 		return nil, err
 	}
 	run.Status = RunStatus(status)

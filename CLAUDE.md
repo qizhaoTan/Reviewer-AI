@@ -2,7 +2,7 @@
 
 ## 产品范围
 
-Reviewer-AI 是一个用大语言模型审查 Git 暂存区变更的 Go 命令行工具。端到端流程：加载配置 → 采集暂存区变更（`git diff --cached`）→ 拼装提示词 → 调用 provider（兼容 OpenAI 或 Anthropic 协议）→ 模型按需调用只读工具补充上下文 → 模型调用 `submit_review` 提交**结构化意见** → 每条意见并发跑一轮**复核**过滤误报 → 渲染 Markdown 到终端，同时落盘到本地 SQLite。
+Reviewer-AI 是一个用大语言模型审查 Git 变更的 Go 命令行工具。端到端流程：加载配置 → 采集变更（默认是暂存区 `git diff --cached`；`-base=dev` 时改为 `git diff dev...HEAD`）→ 拼装提示词 → 调用 provider（兼容 OpenAI 或 Anthropic 协议）→ 模型按需调用只读工具补充上下文 → 模型调用 `submit_review` 提交**结构化意见** → 每条意见并发跑一轮**复核**过滤误报 → 渲染 Markdown 到终端，同时落盘到本地 SQLite。
 
 另有一个 `cr web` 子命令，提供只读的历史浏览界面，并支持对单条意见追问、触发增量重审。
 
@@ -12,7 +12,7 @@ Reviewer-AI 是一个用大语言模型审查 Git 暂存区变更的 Go 命令�
 
 **确定性层（不含任何大模型逻辑）**
 
-- `internal/gitdiff` —— 采集暂存区变更（`git diff --cached`）、`StageAll`、`CurrentBranch`。保持确定性，不要引入大模型逻辑。
+- `internal/gitdiff` —— 采集变更、`StageAll`、`CurrentBranch`。两条采集路径：`LoadStaged`（暂存区）与 `LoadDiffRange`（`base...HEAD`，配套 `ResolveRevision` / `WorkTreeDirtyPaths` / `MergeConflicts` 三个前置校验）。保持确定性，不要引入大模型逻辑。
 - `internal/schema` —— `Message`/`ToolCall`/`ToolDefinition` 类型定义，是大模型层与其他一切的契约。
 - `internal/config` —— 加载 `~/.reviewer/config.json`（`-config` 参数或 `$REVIEWER_AI_CONFIG` 可覆盖路径），把 `roles.primary` 对照 `models` map 解析成 provider 配置。
 - `internal/store` —— SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）持久化运行记录，默认 `~/.reviewer/runs.db`。
@@ -38,7 +38,10 @@ Reviewer-AI 是一个用大语言模型审查 Git 暂存区变更的 Go 命令�
 这些是踩过坑之后的选择，改动前先理解原因：
 
 - **运行记录按内容 hash 匹配，而非"最近一条"** —— 覆盖 `git stash` / `stash pop` 后内容回到原样的场景。只要内容相同就能命中历史记录，命中 completed 的直接复用、不调模型。
-- **runKey 包含分支名** —— 否则在分支 A 中断的审查，切到分支 B 后会被误判为同一次运行继续恢复，模型会拿着 A 的 diff 去审 B 的暂存区。
+- **runKey 包含分支名，`-base` 模式再多一段** —— 形状是 `repo#branch`，base 审查是 `repo#branch#base=dev`。不带分支名的话，在分支 A 中断的审查切到分支 B 后会被误判为同一次运行继续恢复，模型会拿着 A 的 diff 去审 B 的暂存区；不带 base 段的话，同一分支上的暂存区审查与分支审查会共用一条链，增量重审会拿错比较基线。`engine` 和 `web` 各有一份 `splitRunKey`（刻意重复，避免 web 依赖 engine 内部），改一处必须同步另一处——两者都要**先剥 base 段再剥分支段**，否则 `#base=dev` 会被当成分支名。
+- **`-base` 模式要求工作区干净且能无冲突合并** —— diff 按 HEAD 算，而 `read_file` 读的是工作区，工作区脏就意味着模型看到的代码和 diff 对不上；合不上 base 则说明这份 diff 还不是最终要落地的内容。冲突检测用 `git merge-tree --write-tree`（只读，git 2.38+），版本不够时降级为跳过而不是让功能不可用。
+- **`-base` 模式不 auto-stage** —— 这条路径要求工作区干净，而 diff 按 HEAD 算，stage 一把只会制造一个 diff 根本不看的脏索引。增量重审同理，`reloadSnapshot` 按记录上的 `BaseRev` 决定采集方式。
+- **`store.Run.BaseRev` 存用户写的名字而非解析后的 hash** —— 用户的意图是"跟 dev 的最新状态比"，存死 hash 会让增量重审一直对着分支点那一刻的旧 dev。
 - **复核用独立的 ctx，不共享初审的超时预算** —— 复核是一批全新的模型调用，不该去分初审剩下的时间。
 - **复核失败不把运行标记为 failed** —— 留在 `in_progress`，初审结果仍然有效，下次可续跑。
 - **工具调用去重** —— 实测模型判定改动无误后不会收工，而是反复搜同一个符号（20 行改动里同一个常量被 grep 6 次），把审查从几轮拖到二十几轮。这不是上下文丢失，历史结果确实还在上下文里，模型只是没去看。

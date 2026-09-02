@@ -37,6 +37,10 @@ type Interactive struct {
 	// 快照，不必真的建一个 git 仓库。
 	LoadStaged func(ctx context.Context, repoDir string) ([]gitdiff.Change, error)
 
+	// LoadDiffRange 采集 base...HEAD 的变更，`-base` 模式下的增量重审用它替代
+	// LoadStaged。与 LoadStaged 同理做成字段，方便测试注入。
+	LoadDiffRange func(ctx context.Context, repoDir, base string) ([]gitdiff.Change, error)
+
 	// AutoStage 为 true 时，增量重审在采集快照之前先把工作区的改动全部
 	// stage 一次（对应配置里的 auto_stage）。重审按钮的语义就是"我已按意见
 	// 改完"，让用户先手动 add 一次是多余的一步。
@@ -66,7 +70,7 @@ func (i *Interactive) Reply(ctx context.Context, runID, findingID, userReply str
 	}
 	f := run.Findings[idx]
 
-	repoAbs, _ := splitRunKey(run.RepoPath)
+	repoAbs, _, _ := splitRunKey(run.RepoPath)
 	ctx, cancel := i.withTimeout(ctx)
 	defer cancel()
 
@@ -110,18 +114,14 @@ func (i *Interactive) Rereview(ctx context.Context, runID string) (*store.Run, e
 		return nil, fmt.Errorf("run %s does not exist", runID)
 	}
 
-	repoAbs, branch := splitRunKey(base.RepoPath)
-	if i.AutoStage {
-		if err := i.stageAll(ctx, repoAbs); err != nil {
-			return nil, fmt.Errorf("auto-stage changes in %s: %w", repoAbs, err)
-		}
+	repoAbs, branch, baseRev := splitRunKey(base.RepoPath)
+	if baseRev == "" {
+		baseRev = base.BaseRev // 兼容 runKey 里没有 base 段的旧记录
 	}
-	current, err := i.loadStaged(ctx, repoAbs)
+
+	current, err := i.reloadSnapshot(ctx, repoAbs, baseRev)
 	if err != nil {
-		return nil, fmt.Errorf("load staged changes for %s: %w", repoAbs, err)
-	}
-	if len(current) == 0 {
-		return nil, fmt.Errorf("nothing is staged in %s; stage your fixes before re-reviewing", repoAbs)
+		return nil, err
 	}
 
 	split := review.DiffSnapshot(base.Snapshot, current)
@@ -131,12 +131,12 @@ func (i *Interactive) Rereview(ctx context.Context, runID string) (*store.Run, e
 		"vanished", len(split.Vanished), "carried", len(carried))
 
 	if len(split.Changed) == 0 {
-		return nil, fmt.Errorf("no staged file has changed since run %s; there is nothing to re-review", runID)
+		return nil, fmt.Errorf("no file has changed since run %s; there is nothing to re-review", runID)
 	}
 
 	// 只把改动过的文件送审。engine.Run 内部按快照内容 hash 找历史记录，
 	// 这个子集的 hash 与任何完整快照都不同，所以不会误命中基线那次的缓存。
-	fresh, err := Run(ctx, i.Deps, repoAbs, branch, split.Changed, i.timeout())
+	fresh, err := Run(ctx, i.Deps, repoAbs, branch, baseRev, split.Changed, i.timeout())
 	if err != nil {
 		return nil, fmt.Errorf("re-review changed files: %w", err)
 	}
@@ -154,6 +154,7 @@ func (i *Interactive) Rereview(ctx context.Context, runID string) (*store.Run, e
 		Summary:     fresh.Summary,
 		Critiqued:   fresh.Critiqued,
 		ParentRunID: base.ID,
+		BaseRev:     baseRev,
 	}
 	if err := i.Deps.Store.SaveRun(ctx, merged); err != nil {
 		return nil, fmt.Errorf("save re-review run: %w", err)
@@ -185,15 +186,24 @@ func indexOfFinding(findings []review.Finding, id string) int {
 	return -1
 }
 
-// splitRunKey 把 runKey 拆回仓库路径与分支，是 buildRunKey 的逆操作。
-// 用 LastIndex 而不是 Index：仓库路径本身可能含 '#'，分隔符是最后那个。
-// 找不到分隔符时整串当仓库路径、分支留空——阶段一之前的旧记录存的是裸路径。
-func splitRunKey(key string) (repoAbs, branch string) {
+// splitRunKey 把 runKey 拆回仓库路径、分支与基准 revision，是 buildRunKey 的
+// 逆操作。
+//
+// 先剥 base 段再剥分支段：base 段带 "#base=" 这个固定前缀，能可靠地识别出来，
+// 剥掉之后剩下的就是老形状的 "repo#branch"。分支段仍用 LastIndex 找分隔符，
+// 因为仓库路径本身可能含 '#'。
+//
+// 两段都找不到时整串当仓库路径——阶段一之前的旧记录存的是裸路径。
+func splitRunKey(key string) (repoAbs, branch, baseRev string) {
+	if idx := strings.LastIndex(key, baseKeySuffix); idx >= 0 {
+		baseRev = key[idx+len(baseKeySuffix):]
+		key = key[:idx]
+	}
 	idx := strings.LastIndex(key, "#")
 	if idx < 0 {
-		return key, ""
+		return key, "", baseRev
 	}
-	return key[:idx], key[idx+1:]
+	return key[:idx], key[idx+1:], baseRev
 }
 
 func (i *Interactive) timeout() time.Duration {
@@ -205,6 +215,45 @@ func (i *Interactive) timeout() time.Duration {
 
 func (i *Interactive) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, i.timeout())
+}
+
+// reloadSnapshot 按基线那次的审查模式重新采集一份当前快照，供增量重审比较。
+//
+// 两种模式的"当前状态"含义不同，不能混用：暂存区审查看的是索引，所以先按
+// AutoStage 补一次 git add；base 审查看的是 base...HEAD，改动得先提交才算数，
+// 这时候去 stage 工作区反而会制造出一个脏索引，而 diff 根本不看它。
+func (i *Interactive) reloadSnapshot(ctx context.Context, repoAbs, baseRev string) ([]gitdiff.Change, error) {
+	if baseRev != "" {
+		current, err := i.loadDiffRange(ctx, repoAbs, baseRev)
+		if err != nil {
+			return nil, fmt.Errorf("load changes against %s for %s: %w", baseRev, repoAbs, err)
+		}
+		if len(current) == 0 {
+			return nil, fmt.Errorf("%s has no changes against %s; commit your fixes before re-reviewing", repoAbs, baseRev)
+		}
+		return current, nil
+	}
+
+	if i.AutoStage {
+		if err := i.stageAll(ctx, repoAbs); err != nil {
+			return nil, fmt.Errorf("auto-stage changes in %s: %w", repoAbs, err)
+		}
+	}
+	current, err := i.loadStaged(ctx, repoAbs)
+	if err != nil {
+		return nil, fmt.Errorf("load staged changes for %s: %w", repoAbs, err)
+	}
+	if len(current) == 0 {
+		return nil, fmt.Errorf("nothing is staged in %s; stage your fixes before re-reviewing", repoAbs)
+	}
+	return current, nil
+}
+
+func (i *Interactive) loadDiffRange(ctx context.Context, repoDir, baseRev string) ([]gitdiff.Change, error) {
+	if i.LoadDiffRange != nil {
+		return i.LoadDiffRange(ctx, repoDir, baseRev)
+	}
+	return gitdiff.LoadDiffRange(ctx, repoDir, baseRev)
 }
 
 func (i *Interactive) loadStaged(ctx context.Context, repoDir string) ([]gitdiff.Change, error) {

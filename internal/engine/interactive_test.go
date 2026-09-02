@@ -18,22 +18,26 @@ import (
 // 而真正的原因在完全不相干的地方。
 func TestSplitRunKeyInvertsBuildRunKey(t *testing.T) {
 	tests := []struct {
-		name   string
-		repo   string
-		branch string
+		name    string
+		repo    string
+		branch  string
+		baseRev string
 	}{
 		{name: "plain path and branch", repo: "/home/tan/proj", branch: "main"},
 		{name: "branch containing a slash", repo: "/home/tan/proj", branch: "feature/x"},
 		{name: "repo path containing a hash", repo: "/home/tan/pr#42", branch: "main"},
 		{name: "detached head short hash", repo: "/home/tan/proj", branch: "a1b2c3d"},
+		{name: "base review", repo: "/home/tan/proj", branch: "feature", baseRev: "dev"},
+		{name: "base is a remote branch", repo: "/home/tan/proj", branch: "feature", baseRev: "origin/dev"},
+		{name: "base review with a hash in the repo path", repo: "/home/tan/pr#42", branch: "feature/x", baseRev: "dev"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRepo, gotBranch := splitRunKey(buildRunKey(tt.repo, tt.branch))
-			if gotRepo != tt.repo || gotBranch != tt.branch {
-				t.Errorf("splitRunKey(buildRunKey(%q, %q)) = (%q, %q), want (%q, %q)",
-					tt.repo, tt.branch, gotRepo, gotBranch, tt.repo, tt.branch)
+			gotRepo, gotBranch, gotBase := splitRunKey(buildRunKey(tt.repo, tt.branch, tt.baseRev))
+			if gotRepo != tt.repo || gotBranch != tt.branch || gotBase != tt.baseRev {
+				t.Errorf("splitRunKey(buildRunKey(%q, %q, %q)) = (%q, %q, %q), want (%q, %q, %q)",
+					tt.repo, tt.branch, tt.baseRev, gotRepo, gotBranch, gotBase, tt.repo, tt.branch, tt.baseRev)
 			}
 		})
 	}
@@ -102,7 +106,7 @@ func newInteractive(t *testing.T, llm schema.IProvider, base store.Run) *Interac
 
 func baseRun(repoAbs string) store.Run {
 	return store.Run{
-		ID: "run-base", RepoPath: buildRunKey(repoAbs, "main"), Status: store.StatusCompleted,
+		ID: "run-base", RepoPath: buildRunKey(repoAbs, "main", ""), Status: store.StatusCompleted,
 		Snapshot:  []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}},
 		Critiqued: true,
 		Findings: []review.Finding{
@@ -205,6 +209,103 @@ func TestInteractiveReplyRejectsUnknownRun(t *testing.T) {
 			_, err := i.Reply(context.Background(), tt.runID, "f1", "异议")
 			if err == nil || !strings.Contains(err.Error(), "does not exist") {
 				t.Fatalf("Reply() error = %v, want it to say the run does not exist", err)
+			}
+		})
+	}
+}
+
+// TestInteractiveRereviewAgainstBase 覆盖 `-base` 模式下的增量重审：快照要从
+// base...HEAD 重新采集，而不是去读暂存区。走错分支的表现是拿一份暂存区内容跟
+// 一个 base diff 基线做比较，两边的 patch 全不一样，于是"所有文件都改过了"，
+// 整个分支被重审一遍——既贵又没有增量的意义。
+func TestInteractiveRereviewAgainstBase(t *testing.T) {
+	editedPatch := testPatch + "\n// fixed\n"
+
+	tests := []struct {
+		name string
+		// current 是重审时从 base...HEAD 采集到的变更。
+		current []gitdiff.Change
+		// autoStage 置位用来固定住"base 模式下绝不 stage"这条约束。
+		autoStage bool
+		script    []schema.Message
+		wantErr   string
+	}{
+		{
+			name:    "re-collects the diff against base instead of reading the index",
+			current: []gitdiff.Change{{Status: "M", Path: "config.go", Patch: editedPatch}},
+			script: []schema.Message{
+				submitCall("c1", "重审结果", map[string]any{"file": "config.go", "severity": "error", "summary": "还有问题"}),
+			},
+		},
+		{
+			// auto_stage 开着也不能 stage：base diff 按 HEAD 算，动索引只会
+			// 制造一个 diff 根本不看的脏状态。
+			name:      "auto stage is skipped in base mode",
+			current:   []gitdiff.Change{{Status: "M", Path: "config.go", Patch: editedPatch}},
+			autoStage: true,
+			script: []schema.Message{
+				submitCall("c1", "重审结果", map[string]any{"file": "config.go", "severity": "error", "summary": "还有问题"}),
+			},
+		},
+		{
+			name:    "an empty diff against base is an error",
+			current: nil,
+			wantErr: "commit your fixes",
+		},
+		{
+			name:    "an unchanged diff means there is nothing to re-review",
+			current: []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}},
+			wantErr: "nothing to re-review",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			base := baseRun(repo)
+			base.RepoPath = buildRunKey(repo, "feature", "dev")
+			base.BaseRev = "dev"
+
+			llm := &reviewThenCritiqueProvider{fakeProvider: fakeProvider{script: tt.script}}
+			i := newInteractive(t, llm, base)
+			i.AutoStage = tt.autoStage
+			i.StageAll = func(context.Context, string) error {
+				t.Error("StageAll was called in base mode; the index must not be touched")
+				return nil
+			}
+			i.LoadStaged = func(context.Context, string) ([]gitdiff.Change, error) {
+				t.Error("LoadStaged was called in base mode; the diff must come from base...HEAD")
+				return nil, nil
+			}
+			var gotBase string
+			i.LoadDiffRange = func(_ context.Context, _, baseRev string) ([]gitdiff.Change, error) {
+				gotBase = baseRev
+				return tt.current, nil
+			}
+
+			got, err := i.Rereview(context.Background(), "run-base")
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Rereview() error = nil, want one containing %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Rereview() error = %v", err)
+			}
+			if gotBase != "dev" {
+				t.Errorf("LoadDiffRange was called with base %q, want %q", gotBase, "dev")
+			}
+			// base 必须传下去，否则下一次重审读不到它，会退回暂存区模式。
+			if got.BaseRev != "dev" {
+				t.Errorf("BaseRev = %q, want it carried onto the new run", got.BaseRev)
+			}
+			if got.RepoPath != base.RepoPath {
+				t.Errorf("RepoPath = %q, want the baseline's key %q", got.RepoPath, base.RepoPath)
 			}
 		})
 	}

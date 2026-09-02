@@ -410,6 +410,7 @@ func TestSplitRunKey(t *testing.T) {
 		key        string
 		wantRepo   string
 		wantBranch string
+		wantBase   string
 	}{
 		{name: "path and branch", key: "/repo/alpha#main", wantRepo: "/repo/alpha", wantBranch: "main"},
 		{name: "branch containing slash", key: "/repo/alpha#feature/x", wantRepo: "/repo/alpha", wantBranch: "feature/x"},
@@ -422,13 +423,27 @@ func TestSplitRunKey(t *testing.T) {
 			name: "path containing hash", key: "/repo/a#b#main", wantRepo: "/repo/a#b", wantBranch: "main",
 		},
 		{name: "empty key", key: "", wantRepo: "", wantBranch: ""},
+		{
+			// base 段必须先剥掉，否则整个 "#base=dev" 会被当成分支名显示。
+			name: "base review key", key: "/repo/alpha#feature#base=dev",
+			wantRepo: "/repo/alpha", wantBranch: "feature", wantBase: "dev",
+		},
+		{
+			name: "base containing a slash", key: "/repo/alpha#feature#base=origin/dev",
+			wantRepo: "/repo/alpha", wantBranch: "feature", wantBase: "origin/dev",
+		},
+		{
+			name: "base review with a hash in the path", key: "/repo/a#b#feature#base=dev",
+			wantRepo: "/repo/a#b", wantBranch: "feature", wantBase: "dev",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo, branch := splitRunKey(tt.key)
-			if repo != tt.wantRepo || branch != tt.wantBranch {
-				t.Errorf("splitRunKey(%q) = (%q, %q), want (%q, %q)", tt.key, repo, branch, tt.wantRepo, tt.wantBranch)
+			repo, branch, base := splitRunKey(tt.key)
+			if repo != tt.wantRepo || branch != tt.wantBranch || base != tt.wantBase {
+				t.Errorf("splitRunKey(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					tt.key, repo, branch, base, tt.wantRepo, tt.wantBranch, tt.wantBase)
 			}
 		})
 	}

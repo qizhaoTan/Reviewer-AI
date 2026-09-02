@@ -57,7 +57,9 @@ type Deps struct {
 //
 // repoAbs 是仓库的绝对路径，branch 是当前分支名（调用方通过 gitdiff.CurrentBranch
 // 获得），两者拼成 runKey 用于隔离不同分支的运行记录，见 buildRunKey 注释。
-// changes 是本次采集到的暂存区快照；timeout 是整个循环共用的总预算。
+// changes 是本次采集到的变更快照；timeout 是整个循环共用的总预算。
+// baseRev 在 `-base` 模式下是用户指定的基准 revision（快照来自 base...HEAD），
+// 暂存区审查时留空——它同时参与 runKey 的构造，并落盘到记录上供增量重审复用。
 //
 // 如果本次快照内容与某次历史运行（不要求是最近一次）完全一致且那次已经
 // completed，直接复用那次的结果、不再调用模型——常见于 git stash 之后又
@@ -66,10 +68,10 @@ type Deps struct {
 // 返回的 *store.Run 在成功时 Status 为 store.StatusCompleted，审查结果可以从
 // run.Report() 取出。失败时返回的 error 会说明具体原因，对应的 Run 记录已经在
 // 返回前被标记为 store.StatusFailed 并落盘，不需要调用方再做任何清理。
-func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
-	runKey := buildRunKey(repoAbs, branch)
+func Run(ctx context.Context, deps Deps, repoAbs, branch, baseRev string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
+	runKey := buildRunKey(repoAbs, branch, baseRev)
 
-	run, err := resumeOrStartRun(ctx, deps.Store, runKey, changes, deps.LanguagePrompt, deps.Fresh)
+	run, err := resumeOrStartRun(ctx, deps.Store, runKey, baseRev, changes, deps.LanguagePrompt, deps.Fresh)
 	if err != nil {
 		return nil, fmt.Errorf("resume or start run: %w", err)
 	}
@@ -199,9 +201,21 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch string, changes []gitdi
 // buildRunKey 把分支名并入 repo 路径，让同一仓库不同分支的运行记录互不干扰——
 // 否则在分支 A 上中断的审查，切到分支 B 后会被误判为"同一次运行"继续恢复，
 // 模型会拿着分支 A 的 diff/工具调用历史去审查分支 B 的暂存区。
-func buildRunKey(repoAbs, branch string) string {
-	return repoAbs + "#" + branch
+//
+// baseRev 非空（`-base` 模式）时再追加一段，让同一分支上的两种审查各自成链：
+// 在 a 分支跑 `cr` 审的是暂存区，跑 `cr -base=dev` 审的是整个分支的改动，
+// 两者内容不同、基线不同，共用一个 key 会让增量重审拿错比较对象。
+func buildRunKey(repoAbs, branch, baseRev string) string {
+	key := repoAbs + "#" + branch
+	if baseRev != "" {
+		key += baseKeySuffix + baseRev
+	}
+	return key
 }
+
+// baseKeySuffix 是 runKey 里 base 段的前缀。单独定义是因为 buildRunKey 和
+// splitRunKey 必须用同一个字面量，散在两处迟早会改漏一个。
+const baseKeySuffix = "#base="
 
 // resumeOrStartRun 在 runKey 下按本次快照内容的 hash 查找运行记录（不限制状态、
 // 不要求是最新一条，见 store.LoadRunByHash）：
@@ -214,7 +228,7 @@ func buildRunKey(repoAbs, branch string) string {
 // 这类场景——旧记录不会因为不是最新就被忽略，只要内容相同就能找到。
 //
 // fresh 为 true 时跳过上面整套匹配，无条件新建一条记录，见 Deps.Fresh。
-func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, changes []gitdiff.Change, languagePrompt string, fresh bool) (*store.Run, error) {
+func resumeOrStartRun(ctx context.Context, db *store.Store, runKey, baseRev string, changes []gitdiff.Change, languagePrompt string, fresh bool) (*store.Run, error) {
 	hash := gitdiff.SnapshotHash(changes)
 	matched, err := db.LoadRunByHash(ctx, runKey, hash)
 	if err != nil {
@@ -241,6 +255,7 @@ func resumeOrStartRun(ctx context.Context, db *store.Store, runKey string, chang
 		Status:   store.StatusInProgress,
 		Snapshot: changes,
 		Messages: prompt.BuildInitial(changes, languagePrompt),
+		BaseRev:  baseRev,
 	}
 	if err := db.SaveRun(ctx, *run); err != nil {
 		return nil, fmt.Errorf("save initial run: %w", err)

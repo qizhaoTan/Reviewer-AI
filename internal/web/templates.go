@@ -171,7 +171,7 @@ const indexHTML = `<!DOCTYPE html>
         <td class="time mono">{{.UpdatedAt.Format "2006-01-02 15:04:05"}}</td>
         <td><span class="badge {{statusClass .Status}}">{{.Status}}</span></td>
         <td class="repo mono">{{.RepoPath}}</td>
-        <td class="mono">{{if .Branch}}{{.Branch}}{{else}}<span class="placeholder">—</span>{{end}}</td>
+        <td class="mono">{{if .Branch}}{{.Branch}}{{else}}<span class="placeholder">—</span>{{end}}{{if .BaseRev}} <span class="placeholder">→ {{.BaseRev}}</span>{{end}}</td>
         <td class="num">{{.Files}}</td>
         <td class="kept">{{.Kept}}</td>
         <td class="dropped">{{if .Critiqued}}{{.Dropped}}{{else}}<span class="placeholder">未复核</span>{{end}}</td>
@@ -359,6 +359,7 @@ const runHTML = `{{define "findings"}}
       <dt>运行 ID</dt><dd class="mono">{{.Run.ID}}</dd>
       <dt>仓库</dt><dd class="mono">{{.RepoPath}}</dd>
       <dt>分支</dt><dd class="mono">{{if .Branch}}{{.Branch}}{{else}}—{{end}}</dd>
+      {{if .BaseRev}}<dt>对比基准</dt><dd class="mono">{{.BaseRev}}</dd>{{end}}
       <dt>状态</dt><dd><span class="badge {{statusClass .Run.Status}}">{{.Run.Status}}</span></dd>
       <dt>创建时间</dt><dd class="mono">{{.Run.CreatedAt.Format "2006-01-02 15:04:05"}}</dd>
       <dt>更新时间</dt><dd class="mono">{{.Run.UpdatedAt.Format "2006-01-02 15:04:05"}}</dd>

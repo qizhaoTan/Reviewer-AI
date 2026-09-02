@@ -12,17 +12,25 @@ import (
 
 func TestBuildRunKey(t *testing.T) {
 	tests := []struct {
-		name            string
-		repoAbs, branch string
-		want            string
+		name                     string
+		repoAbs, branch, baseRev string
+		want                     string
 	}{
 		{name: "joins repo path and branch with a separator", repoAbs: "/repo/a", branch: "main", want: "/repo/a#main"},
 		{name: "different branches produce different keys", repoAbs: "/repo/a", branch: "feature-x", want: "/repo/a#feature-x"},
+		{
+			name: "base review gets its own key on the same branch", repoAbs: "/repo/a", branch: "feature-x", baseRev: "dev",
+			want: "/repo/a#feature-x#base=dev",
+		},
+		{
+			name: "different bases produce different keys", repoAbs: "/repo/a", branch: "feature-x", baseRev: "origin/dev",
+			want: "/repo/a#feature-x#base=origin/dev",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := buildRunKey(tt.repoAbs, tt.branch); got != tt.want {
-				t.Errorf("buildRunKey(%q, %q) = %q, want %q", tt.repoAbs, tt.branch, got, tt.want)
+			if got := buildRunKey(tt.repoAbs, tt.branch, tt.baseRev); got != tt.want {
+				t.Errorf("buildRunKey(%q, %q, %q) = %q, want %q", tt.repoAbs, tt.branch, tt.baseRev, got, tt.want)
 			}
 		})
 	}
@@ -126,7 +134,7 @@ func TestResumeOrStartRun(t *testing.T) {
 				}
 			}
 
-			got, err := resumeOrStartRun(ctx, db, runKey, tt.changes, "", false)
+			got, err := resumeOrStartRun(ctx, db, runKey, "", tt.changes, "", false)
 			if err != nil {
 				t.Fatalf("resumeOrStartRun: %v", err)
 			}
@@ -169,7 +177,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	const runKey = "/repo/a#main"
 
 	// 1. 审查 A，跑完。
-	runA, err := resumeOrStartRun(ctx, db, runKey, snapshotA, "", false)
+	runA, err := resumeOrStartRun(ctx, db, runKey, "", snapshotA, "", false)
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(A): %v", err)
 	}
@@ -180,7 +188,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	}
 
 	// 2. git stash：暂存区变成 B，审查 B（成为"最新"记录）。
-	runB, err := resumeOrStartRun(ctx, db, runKey, snapshotB, "", false)
+	runB, err := resumeOrStartRun(ctx, db, runKey, "", snapshotB, "", false)
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(B): %v", err)
 	}
@@ -189,7 +197,7 @@ func TestResumeOrStartRun_StashRoundTrip(t *testing.T) {
 	}
 
 	// 3. git stash pop：暂存区变回 A。即使 B 现在是"最新"记录，也应该找到 A 的旧结果。
-	gotA, err := resumeOrStartRun(ctx, db, runKey, snapshotA, "", false)
+	gotA, err := resumeOrStartRun(ctx, db, runKey, "", snapshotA, "", false)
 	if err != nil {
 		t.Fatalf("resumeOrStartRun(A again): %v", err)
 	}
