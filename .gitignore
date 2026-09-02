@@ -1,6 +1,7 @@
 .idea
 bin/
 cr
+.DS_Store
 
 # 本地分发配置（含主机地址，不入库）
 deploy.mk
