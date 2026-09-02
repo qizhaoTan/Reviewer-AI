@@ -87,28 +87,42 @@ type indexedLine struct {
 //
 // 关键点在于两个计数器要各自独立推进：新增行只推进 newLine，删除行只推进
 // oldLine，上下文行两个都推进——这正是模型自己数不对的地方。
+//
+// 空行不进入结果，与 splitAndNormalize 丢弃 anchor 空行保持对称：两侧的序列
+// 形状必须一致，否则滑动窗口一撞上代码里的空行就断，anchor 只要含一个空行
+// 就永远匹配不上。但行号计数器照常推进——空行在文件里仍然占一行，跳过计数
+// 会让它之后的所有行号偏移。
 func extractSideLines(hunk *gitdiff.Hunk, newSide bool) []indexedLine {
 	result := make([]indexedLine, 0, len(hunk.Lines))
 	oldLine, newLine := hunk.OldStart, hunk.NewStart
+
+	// 收拢成一个闭包，让"过滤空行"只存在于一处：三个 case 各写一遍的话，
+	// 将来加分支很容易漏掉其中一个，而漏掉的症状（某类 anchor 静默失配）
+	// 恰恰是最难发现的。
+	keep := func(lineNum int, content string) {
+		if n := normalizeLine(content); n != "" {
+			result = append(result, indexedLine{lineNum, n})
+		}
+	}
 
 	for _, l := range hunk.Lines {
 		switch l.Type {
 		case gitdiff.HunkContext:
 			if newSide {
-				result = append(result, indexedLine{newLine, normalizeLine(l.Content)})
+				keep(newLine, l.Content)
 			} else {
-				result = append(result, indexedLine{oldLine, normalizeLine(l.Content)})
+				keep(oldLine, l.Content)
 			}
 			oldLine++
 			newLine++
 		case gitdiff.HunkAdded:
 			if newSide {
-				result = append(result, indexedLine{newLine, normalizeLine(l.Content)})
+				keep(newLine, l.Content)
 			}
 			newLine++
 		case gitdiff.HunkDeleted:
 			if !newSide {
-				result = append(result, indexedLine{oldLine, normalizeLine(l.Content)})
+				keep(oldLine, l.Content)
 			}
 			oldLine++
 		}

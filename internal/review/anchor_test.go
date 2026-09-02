@@ -30,6 +30,37 @@ index 1234567..89abcde 100644
  	return &f, nil
 `
 
+// blankLinePatch 的**代码本身**含空行，用来盯住 anchor 侧与 diff 侧的对称性。
+// samplePatch 里一行空行都没有，所以它只能验证"anchor 带空行"这一半；真实代码
+// 里空行随处可见，diff 侧带空行才是常态。
+//
+// 新文件侧的行号推演：
+//
+//	30  func Draw(id int) error {     （上下文）
+//	31  	base := find(id)           （新增）
+//	32                                （新增，空行）
+//	33  	if base == nil {           （新增）
+//	34  		return errNotFound     （新增）
+//	35  	}                          （新增）
+//	36                                （新增，空行）
+//	37  	return grant(base)         （新增）
+//	38  }                             （上下文）
+const blankLinePatch = `diff --git a/draw.go b/draw.go
+index 1234567..89abcde 100644
+--- a/draw.go
++++ b/draw.go
+@@ -30,2 +30,9 @@ package draw
+ func Draw(id int) error {
++	base := find(id)
++
++	if base == nil {
++		return errNotFound
++	}
++
++	return grant(base)
+ }
+`
+
 // deletionPatch 只删不增，用于验证"意见针对被删掉的代码"时退到旧文件侧定位。
 // 旧文件侧行号：20 = "func Deprecated() {"，21 = "	panic(\"unused\")"，22 = "}"
 const deletionPatch = `--- a/old.go
@@ -78,6 +109,34 @@ func TestResolveAnchor(t *testing.T) {
 			patch:     samplePatch,
 			anchor:    "if err != nil {\n\n\treturn nil, err\n\n}",
 			wantStart: 12, wantEnd: 14, wantFound: true,
+		},
+		{
+			// 模型通常从 read_file 的输出抄 anchor，那里没有 diff 的空行；
+			// 而 diff 侧原样保留着空行。两侧形状不一致时窗口会在空行处断掉。
+			name:      "blank lines in the diff are ignored when the anchor has none",
+			patch:     blankLinePatch,
+			anchor:    "base := find(id)\nif base == nil {",
+			wantStart: 31, wantEnd: 33, wantFound: true,
+		},
+		{
+			name:      "blank lines on both sides are ignored",
+			patch:     blankLinePatch,
+			anchor:    "base := find(id)\n\nif base == nil {\n\treturn errNotFound\n}",
+			wantStart: 31, wantEnd: 35, wantFound: true,
+		},
+		{
+			// 空行不进匹配序列，但行号计数器必须照常推进：这里 return grant(base)
+			// 之前隔着两个空行，行号错的话会落在 35 而不是 37。
+			name:      "line numbers stay correct across skipped blank lines",
+			patch:     blankLinePatch,
+			anchor:    "return grant(base)",
+			wantStart: 37, wantEnd: 37, wantFound: true,
+		},
+		{
+			name:      "anchor spanning the whole blank line body resolves",
+			patch:     blankLinePatch,
+			anchor:    "func Draw(id int) error {\nbase := find(id)\nif base == nil {\nreturn errNotFound\n}\nreturn grant(base)\n}",
+			wantStart: 30, wantEnd: 38, wantFound: true,
 		},
 		{
 			name:      "context line resolves to its new file line",
