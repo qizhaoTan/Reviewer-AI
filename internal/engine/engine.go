@@ -256,12 +256,12 @@ func budgetNotice(iteration int) string {
 	switch {
 	case iteration == maxToolLoopIterations-warnBeforeExhaust+1:
 		return fmt.Sprintf("提醒：本次审查的调查轮次即将用尽，你还剩 %d 轮可以调用工具。"+
-			"请立刻停止进一步探索，用已经掌握的信息调用 %s 提交审查结果"+
+			"请尽快停止进一步探索，用已经掌握的信息调用 %s 提交审查结果"+
 			"（如果没发现问题，findings 传空数组）。",
 			warnBeforeExhaust, tool.SubmitReviewName)
 	case iteration == maxToolLoopIterations+1:
-		return fmt.Sprintf("调查轮次已经用尽，现在只剩 %s 一个工具可用，其余工具已被移除。"+
-			"不要再尝试读取或搜索代码——就用你已经掌握的信息，现在调用 %s 提交审查结果"+
+		return fmt.Sprintf("调查轮次已经用尽，现在已禁止使用只读工具，只剩 %s 一个工具可用。"+
+			"不要再尝试读取或搜索代码——就用你已经掌握的信息，现在必须调用 %s 提交审查结果"+
 			"（如果没发现问题，findings 传空数组）。",
 			tool.SubmitReviewName, tool.SubmitReviewName)
 	}
