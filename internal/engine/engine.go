@@ -19,8 +19,22 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/tool"
 )
 
-// maxToolLoopIterations 是单次审查运行里 Generate 调用的最大轮数，防止模型无限循环调用工具。
-const maxToolLoopIterations = 60
+// 三个常量共同描述一次审查运行的轮次预算。刻意写死而不做成配置项：
+// 这是一组需要一起调的数字，单独暴露某一个只会让它们失配。
+const (
+	// maxToolLoopIterations 是调查阶段（模型可以自由使用只读工具）的最大轮数。
+	maxToolLoopIterations = 60
+
+	// forcedSubmitIterations 是调查阶段用尽后额外追加的收尾轮数。这几轮里模型
+	// 只能看到 submit_review 一个工具——实测模型跑满 60 轮不收工时，手上其实
+	// 已经有足够的判断依据，缺的只是"停下来"这个动作，所以把探索的路堵死比
+	// 再给它 20 轮自由调查更有效。
+	forcedSubmitIterations = 5
+
+	// warnBeforeExhaust 是在调查阶段还剩几轮时开始注入预警。模型不知道自己有
+	// 轮次上限，不提醒的话它会一直按"时间无限"的节奏往下查，直到被硬砍。
+	warnBeforeExhaust = 5
+)
 
 // Deps 是 Run 所需的外部依赖，由调用方组装好后传入。
 type Deps struct {
@@ -102,8 +116,31 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch, baseRev string, change
 	// deduper 跨轮记录已执行过的工具调用，用于拦截模型的重复搜索，见 dedup.go。
 	deduper := newCallDeduper()
 
-	for iteration := 1; iteration <= maxToolLoopIterations; iteration++ {
-		resp, err := deps.LLM.Generate(genCtx, msgs, toolDefinitions)
+	// 收尾阶段只把 submit_review 递给模型：调查阶段的轮次已经花完，再让它看见
+	// 只读工具就等于继续邀请它探索。找不到 submit_review（调用方装配 Tools 时
+	// 漏了）就退化成"工具集不变"，此时收尾阶段与调查阶段无异，但至少不会让
+	// 模型面对一个空工具列表。
+	forcedTools := submitOnlyTools(toolDefinitions)
+
+	totalIterations := maxToolLoopIterations + forcedSubmitIterations
+	for iteration := 1; iteration <= totalIterations; iteration++ {
+		forced := iteration > maxToolLoopIterations
+
+		// 预警和收尾通告都作为一条 user 消息追加进历史，和"未调用工具"的提醒
+		// 走同一条路子。它们会随历史落盘、在续跑时留下来——续跑的轮次计数会
+		// 重置，这条过期提醒因此会略微失真，但它只是催促模型收尾，方向和续跑
+		// 时想要的行为一致，所以不值得为它引入一套"临时消息"机制。
+		if notice := budgetNotice(iteration); notice != "" {
+			msgs = append(msgs, schema.Message{Role: schema.RoleUser, Content: notice})
+			setMessages(ctx, deps.Store, run, msgs)
+		}
+
+		activeTools := toolDefinitions
+		if forced {
+			activeTools = forcedTools
+		}
+
+		resp, err := deps.LLM.Generate(genCtx, msgs, activeTools)
 		if err != nil {
 			// 刻意**不**标记 failed：Generate 出错基本都是网络抖动或超出本次
 			// 时间预算这类外部原因，跟已经攒下来的消息历史无关。留在
@@ -149,12 +186,19 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch, baseRev string, change
 			}
 
 			var result tool.Result
-			if t, err := tool.FindToolByName(deps.Tools, tc.Name); err != nil {
+			switch t, err := tool.FindToolByName(deps.Tools, tc.Name); {
+			case err != nil:
 				result = tool.Result{
 					Output:  fmt.Sprintf("未知工具 %q，不存在这个工具。只能使用本次会话中提供给你的那些工具。", tc.Name),
 					IsError: true,
 				}
-			} else {
+			case forced && tc.Name != tool.SubmitReviewName:
+				// 收尾阶段仍然调只读工具：多半是模型照着上文里的旧工具定义继续
+				// 探索。执行它只会再喂出一批新线索、把这几轮也烧光，所以直接拒绝，
+				// 并说清楚现在唯一该做的动作是什么。
+				log.Info("收尾阶段拒绝只读工具调用", "tool", tc.Name)
+				result = tool.Result{Output: forcedToolRejection(tc.Name), IsError: true}
+			default:
 				result = t.Execute(ctx, repoAbs, tc.Arguments)
 			}
 
@@ -195,7 +239,53 @@ func Run(ctx context.Context, deps Deps, repoAbs, branch, baseRev string, change
 		}
 	}
 
-	return nil, failRun(ctx, deps.Store, run, "exceeded max tool-call iterations (%d) without calling %s", maxToolLoopIterations, tool.SubmitReviewName)
+	return nil, failRun(ctx, deps.Store, run,
+		"exceeded max tool-call iterations (%d investigation + %d forced submit) without calling %s",
+		maxToolLoopIterations, forcedSubmitIterations, tool.SubmitReviewName)
+}
+
+// budgetNotice 返回第 iteration 轮开始前要注入的轮次提醒，没有可提醒的返回空串。
+//
+// 模型看不到轮次上限，只靠自己的节奏感决定查到什么程度。实测这个节奏感在
+// 大改动上会失灵：它一路往下查，直到被硬砍在 60 轮，一条意见都没提交。所以
+// 在预算快见底时明说还剩几轮，把"该收尾了"变成上下文里的事实而不是暗示。
+//
+// 预警只在剩余轮数刚好等于 warnBeforeExhaust 的那一轮发一次，不是每轮都发：
+// 连着刷同一句话会稀释它的分量，也会把历史撑大。
+func budgetNotice(iteration int) string {
+	switch {
+	case iteration == maxToolLoopIterations-warnBeforeExhaust+1:
+		return fmt.Sprintf("提醒：本次审查的调查轮次即将用尽，你还剩 %d 轮可以调用工具。"+
+			"请立刻停止进一步探索，用已经掌握的信息调用 %s 提交审查结果"+
+			"（如果没发现问题，findings 传空数组）。",
+			warnBeforeExhaust, tool.SubmitReviewName)
+	case iteration == maxToolLoopIterations+1:
+		return fmt.Sprintf("调查轮次已经用尽，现在只剩 %s 一个工具可用，其余工具已被移除。"+
+			"不要再尝试读取或搜索代码——就用你已经掌握的信息，现在调用 %s 提交审查结果"+
+			"（如果没发现问题，findings 传空数组）。",
+			tool.SubmitReviewName, tool.SubmitReviewName)
+	}
+	return ""
+}
+
+// forcedToolRejection 是收尾阶段拒绝只读工具调用时回喂给模型的错误信息。
+// 按项目约定，工具错误必须同时说清"错在哪"和"该怎么改"。
+func forcedToolRejection(name string) string {
+	return fmt.Sprintf("工具 %q 在当前阶段不可用：调查轮次已经用尽，只剩 %s 可以调用。"+
+		"不要再调查代码，直接用已有信息调用 %s 提交审查结果（如果没发现问题，findings 传空数组）。",
+		name, tool.SubmitReviewName, tool.SubmitReviewName)
+}
+
+// submitOnlyTools 从完整工具定义里挑出 submit_review 一个，作为收尾阶段的工具集。
+// 找不到就原样返回——调用方漏装 submit_review 是配置问题，不该由这里静默地把
+// 模型的工具列表清空。
+func submitOnlyTools(all []schema.ToolDefinition) []schema.ToolDefinition {
+	for _, d := range all {
+		if d.Name == tool.SubmitReviewName {
+			return []schema.ToolDefinition{d}
+		}
+	}
+	return all
 }
 
 // buildRunKey 把分支名并入 repo 路径，让同一仓库不同分支的运行记录互不干扰——

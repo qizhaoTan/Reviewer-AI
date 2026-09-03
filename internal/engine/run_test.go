@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,6 +97,19 @@ func globCall(id string) schema.Message {
 	return schema.Message{
 		Role:      schema.RoleAssistant,
 		ToolCalls: []schema.ToolCall{{ID: id, Name: "glob", Arguments: json.RawMessage(`{"pattern":"*.go"}`)}},
+	}
+}
+
+// globCallN 构造第 n 次只读工具调用，参数各不相同——参数相同的调用会被 dedup
+// 拦下、不进入正常的执行路径，而这里要的是"每轮都实打实占掉一轮"。
+func globCallN(n int) schema.Message {
+	return schema.Message{
+		Role: schema.RoleAssistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:        fmt.Sprintf("tc%d", n),
+			Name:      "glob",
+			Arguments: json.RawMessage(fmt.Sprintf(`{"pattern":"dir%d/*.go"}`, n)),
+		}},
 	}
 }
 
@@ -205,10 +219,10 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			name:            "never submitting exhausts the loop and fails the run",
+			name:            "never submitting exhausts investigation and forced-submit rounds, then fails the run",
 			script:          nil, // 脚本为空 → 每轮都返回自由文本，永远不提交
 			wantErrContains: tool.SubmitReviewName,
-			wantCalls:       maxToolLoopIterations,
+			wantCalls:       maxToolLoopIterations + forcedSubmitIterations,
 			wantStatus:      store.StatusFailed,
 		},
 	}
@@ -780,6 +794,132 @@ func TestRunResumesFromCritique(t *testing.T) {
 			}
 			if got := len(run.Report().KeptFindings()); got != tt.wantKept {
 				t.Errorf("kept findings = %d, want %d", got, tt.wantKept)
+			}
+		})
+	}
+}
+
+// TestRunBudgetNotices 锁住轮次预算的两条注入：调查阶段快用尽时的预警，以及
+// 进入收尾阶段时的通告。模型看不见轮次上限，这两条消息是它唯一的信号来源。
+func TestRunBudgetNotices(t *testing.T) {
+	tests := []struct {
+		name string
+		// stopAt 是模型提交 submit_review 的轮次（1-based）。
+		stopAt int
+		// wantWarn / wantForced 是期望历史里出现的两类提醒。
+		wantWarn   bool
+		wantForced bool
+	}{
+		{name: "submitting early sees no notice at all", stopAt: 1},
+		{
+			name:     "reaching the warning threshold gets a heads-up",
+			stopAt:   maxToolLoopIterations - warnBeforeExhaust + 1,
+			wantWarn: true,
+		},
+		{
+			name:       "entering the forced phase gets both notices",
+			stopAt:     maxToolLoopIterations + 1,
+			wantWarn:   true,
+			wantForced: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+			// 前 stopAt-1 轮各调一次参数不同的 glob（参数相同会被 dedup 拦下），
+			// 最后一轮提交。
+			script := make([]schema.Message, 0, tt.stopAt)
+			for i := 1; i < tt.stopAt; i++ {
+				script = append(script, globCallN(i))
+			}
+			script = append(script, submitCall("submit", "done"))
+
+			llm := &fakeProvider{script: script}
+			deps, _ := newTestDeps(t, llm, changes)
+
+			run, err := Run(context.Background(), deps, t.TempDir(), "main", "", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if llm.calls != tt.stopAt {
+				t.Fatalf("Generate called %d times, want %d", llm.calls, tt.stopAt)
+			}
+
+			var gotWarn, gotForced bool
+			for _, m := range run.Messages {
+				if m.Role != schema.RoleUser || m.ToolCallID != "" {
+					continue
+				}
+				if strings.Contains(m.Content, "调查轮次即将用尽") {
+					gotWarn = true
+				}
+				if strings.Contains(m.Content, "调查轮次已经用尽") {
+					gotForced = true
+				}
+			}
+			if gotWarn != tt.wantWarn {
+				t.Errorf("warning notice present = %v, want %v", gotWarn, tt.wantWarn)
+			}
+			if gotForced != tt.wantForced {
+				t.Errorf("forced-phase notice present = %v, want %v", gotForced, tt.wantForced)
+			}
+		})
+	}
+}
+
+// TestRunForcedPhaseOffersOnlySubmitReview 锁住收尾阶段的两道闸：递给模型的
+// 工具定义只剩 submit_review，且即便模型照着旧上下文继续调只读工具也会被拒。
+func TestRunForcedPhaseOffersOnlySubmitReview(t *testing.T) {
+	tests := []struct {
+		name string
+		// forcedCall 是收尾阶段第一轮模型发起的调用。
+		forcedCall schema.Message
+		// wantRejected 为 true 时期望历史里出现"当前阶段不可用"的拒绝信息。
+		wantRejected bool
+	}{
+		{
+			name:         "read-only calls in the forced phase are rejected",
+			forcedCall:   globCallN(9999),
+			wantRejected: true,
+		},
+		{
+			name:         "submit_review in the forced phase still goes through",
+			forcedCall:   submitCall("late", "finally done"),
+			wantRejected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changes := []gitdiff.Change{{Status: "M", Path: "config.go", Patch: testPatch}}
+			script := make([]schema.Message, 0, maxToolLoopIterations+2)
+			for i := 1; i <= maxToolLoopIterations; i++ {
+				script = append(script, globCallN(i))
+			}
+			script = append(script, tt.forcedCall, submitCall("submit", "done"))
+
+			llm := &fakeProvider{script: script}
+			deps, _ := newTestDeps(t, llm, changes)
+
+			run, err := Run(context.Background(), deps, t.TempDir(), "main", "", changes, time.Minute)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			// 最后一次 Generate 落在收尾阶段，工具定义必须只有 submit_review。
+			if len(llm.sawTools) != 1 || llm.sawTools[0] != tool.SubmitReviewName {
+				t.Errorf("tools offered in the forced phase = %v, want only %q", llm.sawTools, tool.SubmitReviewName)
+			}
+
+			var rejected bool
+			for _, m := range run.Messages {
+				if strings.Contains(m.Content, "在当前阶段不可用") {
+					rejected = true
+				}
+			}
+			if rejected != tt.wantRejected {
+				t.Errorf("rejection notice present = %v, want %v", rejected, tt.wantRejected)
 			}
 		})
 	}
