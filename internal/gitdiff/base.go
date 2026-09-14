@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 )
 
 // LoadDiffRange 返回从 base 与 HEAD 的合并基点（merge base）到 HEAD 的文件级
@@ -16,7 +18,7 @@ import (
 // 有而 HEAD 上没有"的提交也算进来，表现为一堆凭空出现的删除行——那是别人在
 // base 上的工作，不该出现在本分支的审查范围里。三点 diff 只包含当前分支自己
 // 引入的改动，正是 `git merge --squash` 到 base 之后暂存区里会有的内容。
-func LoadDiffRange(ctx context.Context, repoDir, base string) ([]Change, error) {
+func LoadDiffRange(ctx context.Context, repoDir, base string, rules ...string) ([]Change, error) {
 	spec := base + "...HEAD"
 	entries, err := git(ctx, repoDir, "diff", "--name-status", "-z", "--no-renames", spec, "--")
 	if err != nil {
@@ -35,6 +37,9 @@ func LoadDiffRange(ctx context.Context, repoDir, base string) ([]Change, error) 
 	for i := 0; i < len(fields); i += 2 {
 		status := string(fields[i])
 		path := string(fields[i+1])
+		if ignore.Match(rules, path) {
+			continue
+		}
 		patch, err := git(ctx, repoDir,
 			"diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3", spec, "--", path,
 		)

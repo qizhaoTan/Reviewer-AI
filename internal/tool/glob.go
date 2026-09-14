@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
@@ -24,19 +25,19 @@ type GlobInput struct {
 
 // GlobTool 是 glob 工具的 ITool 实现，方法体直接委托给同包的
 // GlobDefinition/Glob 自由函数，不重复业务逻辑。
-type GlobTool struct{}
+type GlobTool struct{ Ignore []string }
 
 func (GlobTool) Definition() schema.ToolDefinition { return GlobDefinition() }
 
-func (GlobTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
-	return Glob(ctx, repoRoot, args)
+func (t GlobTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+	return Glob(ctx, repoRoot, args, t.Ignore...)
 }
 
 // GlobDefinition 返回 glob 工具向模型公开的元信息。
 func GlobDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        "glob",
-		Description: "List repository files matching a glob pattern (supports ** for recursive matching, e.g. \"internal/**/*.go\"). Returns only file paths, not content — use this to discover which files exist before calling read_file. Omit pattern to list all files. Files ignored by .gitignore are excluded by default; set no_ignore to true to include them. Hidden files and directories (names starting with a dot) are not listed either way.",
+		Description: "List repository files matching a glob pattern (supports ** for recursive matching, e.g. \"internal/**/*.go\"). Returns only file paths, not content — use this to discover which files exist before calling read_file. Omit pattern to list all files. Files ignored by .gitignore are excluded by default; set no_ignore to true to include them. Configured ignore rules always apply, including when no_ignore is true. Hidden files and directories (names starting with a dot) are not listed either way.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -46,7 +47,7 @@ func GlobDefinition() schema.ToolDefinition {
 				},
 				"no_ignore": map[string]interface{}{
 					"type":        "boolean",
-					"description": "Set to true to also list files excluded by .gitignore (e.g. build output or generated code you need to inspect). Defaults to false. Hidden files are not listed even when this is true.",
+					"description": "Set to true to also list files excluded by .gitignore (e.g. build output or generated code you need to inspect). Defaults to false. Configured ignore rules always apply, including when no_ignore is true. Hidden files are not listed even when this is true.",
 				},
 			},
 		},
@@ -55,7 +56,7 @@ func GlobDefinition() schema.ToolDefinition {
 
 // Glob 执行一次 glob 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 有 ripgrep 时优先调用它（更快，原生尊重 .gitignore）；否则回退到标准库遍历实现。
-func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+func Glob(ctx context.Context, repoRoot string, args json.RawMessage, rules ...string) Result {
 	var input GlobInput
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{Output: fmt.Sprintf("glob 的参数不是合法的 JSON（%v）。请用类似 {\"pattern\": \"**/*.go\"} 的 JSON 对象重新调用 glob。", err), IsError: true}
@@ -70,9 +71,9 @@ func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 		err   error
 	)
 	if ripgrepAvailable() {
-		paths, err = globWithRipgrep(repoRoot, pattern, input.NoIgnore)
+		paths, err = globWithRipgrep(repoRoot, pattern, input.NoIgnore, rules...)
 	} else {
-		paths, err = globWithStdlib(repoRoot, pattern)
+		paths, err = globWithStdlib(repoRoot, pattern, rules...)
 	}
 	if err != nil {
 		return Result{Output: fmt.Sprintf("glob：%v。请检查 pattern 是否合法（例如 \"**/*.go\"、\"internal/*.go\"）后重试。", err), IsError: true}
@@ -106,7 +107,7 @@ func Glob(ctx context.Context, repoRoot string, args json.RawMessage) Result {
 // 后续可迭代方向：目前只用 --glob 单一模式过滤；Claude Code 的实现还会加 --sort=modified
 // 按修改时间排序，这里为了让 rg/标准库两条路径的输出顺序一致（都按路径字符串排序），
 // 暂不启用 --sort，如果之后发现"最近改动的文件更相关"这个信号有用，可以加回来。
-func globWithRipgrep(repoRoot, pattern string, noIgnore bool) ([]string, error) {
+func globWithRipgrep(repoRoot, pattern string, noIgnore bool, rules ...string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), searchTimeoutSeconds*time.Second)
 	defer cancel()
 
@@ -117,6 +118,7 @@ func globWithRipgrep(repoRoot, pattern string, noIgnore bool) ([]string, error) 
 		args = append(args, "--no-ignore")
 	}
 
+	args = append(args, ignore.RipgrepArgs(rules)...)
 	cmd := exec.CommandContext(ctx, "rg", args...)
 	cmd.Dir = repoRoot
 	var stdout, stderr bytes.Buffer
@@ -139,7 +141,7 @@ func globWithRipgrep(repoRoot, pattern string, noIgnore bool) ([]string, error) 
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
 	paths := make([]string, 0, len(lines))
 	for _, l := range lines {
-		if l != "" {
+		if l != "" && !ignore.Excluded(rules, repoRoot, l) {
 			paths = append(paths, filepath.ToSlash(l))
 		}
 	}
@@ -147,7 +149,7 @@ func globWithRipgrep(repoRoot, pattern string, noIgnore bool) ([]string, error) 
 }
 
 // globWithStdlib 是没有 rg 时的回退实现：遍历 repoRoot，用 matchGlob 做 ** 感知的模式匹配。
-func globWithStdlib(repoRoot, pattern string) ([]string, error) {
+func globWithStdlib(repoRoot, pattern string, rules ...string) ([]string, error) {
 	var paths []string
 	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -156,6 +158,12 @@ func globWithStdlib(repoRoot, pattern string) ([]string, error) {
 		rel, relErr := filepath.Rel(repoRoot, path)
 		if relErr != nil {
 			return relErr
+		}
+		if rel != "." && ignore.Excluded(rules, repoRoot, rel) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			if rel != "." && (ignoredDirNames[d.Name()] || isHiddenName(d.Name())) {

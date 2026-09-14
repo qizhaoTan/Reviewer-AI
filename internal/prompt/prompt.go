@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -50,9 +51,9 @@ const systemPrompt = `你是一位严谨的资深代码审查者，正在提交�
 //
 // languagePrompt 由调用方从配置读出，追加到 system prompt 末尾；传空串表示不加
 // 语言约束。
-func BuildInitial(changes []gitdiff.Change, languagePrompt string) []schema.Message {
+func BuildInitial(changes []gitdiff.Change, languagePrompt string, rules ...string) []schema.Message {
 	return []schema.Message{
-		{Role: schema.RoleSystem, Content: WithLanguage(systemPrompt, languagePrompt)},
+		{Role: schema.RoleSystem, Content: WithLanguage(systemPrompt+ignorePolicy(rules), languagePrompt)},
 		{Role: schema.RoleUser, Content: formatChanges(changes)},
 	}
 }
@@ -82,4 +83,28 @@ func formatChanges(changes []gitdiff.Change) string {
 		fmt.Fprintf(&b, "## 文件：%s（状态：%s）\n```diff\n%s\n```\n\n", c.Path, c.Status, c.Patch)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+const ignorePolicyPrefix = "\nConfigured file exclusions (apply to diffs and all file tools): "
+
+func ignorePolicy(rules []string) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(rules)
+	return ignorePolicyPrefix + string(data)
+}
+
+// MatchesIgnorePolicy prevents old tool results from re-entering context after
+// the exclusion policy changes, even when the diff itself is unchanged.
+func MatchesIgnorePolicy(messages []schema.Message, rules []string) bool {
+	if len(messages) == 0 {
+		return len(rules) == 0
+	}
+	_, policy, found := strings.Cut(messages[0].Content, ignorePolicyPrefix)
+	if len(rules) == 0 {
+		return !found
+	}
+	policy, _, _ = strings.Cut(policy, "\n")
+	return found && ignorePolicyPrefix+policy == ignorePolicy(rules)
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 	"github.com/qizhaoTan/Reviewer-AI/internal/provider"
 )
 
@@ -90,6 +91,8 @@ func (c Critique) MaxTurnsOrDefault() int {
 
 // File 是 config.json 的顶层结构。
 type File struct {
+	// Ignore excludes matching paths from diffs and all file tools.
+	Ignore   []string               `json:"ignore"`
 	Models   map[string]ModelConfig `json:"models"`
 	Roles    Roles                  `json:"roles"`
 	Critique Critique               `json:"critique"`
@@ -127,6 +130,9 @@ func Load(path string) (*File, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse config file %q: %w", path, err)
 	}
+	if err := ignore.Validate(f.Ignore); err != nil {
+		return nil, fmt.Errorf("config %q: %w", path, err)
+	}
 	return &f, nil
 }
 
@@ -163,4 +169,63 @@ func (f *File) LanguagePromptOrDefault() string {
 		return defaultLanguagePrompt
 	}
 	return *f.LanguagePrompt
+}
+
+// LoadMerged recursively overlays the optional project config on the base config.
+// Missing files are allowed when the other file exists. Arrays and scalars replace;
+// null resets a field to its zero/default value.
+func LoadMerged(basePath, projectDir string) (*File, error) {
+	projectPath := filepath.Join(projectDir, ".reviewer", "config.json")
+	merged := map[string]json.RawMessage{}
+	found := false
+	for _, path := range []string{basePath, projectPath} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read config file %q: %w", path, err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return nil, fmt.Errorf("parse config file %q: %w", path, err)
+		}
+		if obj == nil {
+			return nil, fmt.Errorf("config %q must be a JSON object", path)
+		}
+		// Validate each layer's types even if an override would hide the mistake.
+		var layer File
+		if err := json.Unmarshal(data, &layer); err != nil {
+			return nil, fmt.Errorf("parse config file %q: %w", path, err)
+		}
+		if err := ignore.Validate(layer.Ignore); err != nil {
+			return nil, fmt.Errorf("config %q: %w", path, err)
+		}
+		mergeObjects(merged, obj)
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("no config found; create %q or %q", basePath, projectPath)
+	}
+	data, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	var f File
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse merged config: %w", err)
+	}
+	return &f, nil
+}
+
+func mergeObjects(dst, src map[string]json.RawMessage) {
+	for key, value := range src {
+		var oldObj, newObj map[string]json.RawMessage
+		if json.Unmarshal(dst[key], &oldObj) == nil && oldObj != nil && json.Unmarshal(value, &newObj) == nil && newObj != nil {
+			mergeObjects(oldObj, newObj)
+			dst[key], _ = json.Marshal(oldObj)
+		} else {
+			dst[key] = value
+		}
+	}
 }

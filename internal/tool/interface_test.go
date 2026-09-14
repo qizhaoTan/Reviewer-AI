@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -106,7 +107,7 @@ func TestFindToolByName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("FindToolByName(%q) unexpected error: %v", tt.lookup, err)
 			}
-			if got != tt.wantTool {
+			if !reflect.DeepEqual(got, tt.wantTool) {
 				t.Errorf("FindToolByName(%q) = %v, want %v", tt.lookup, got, tt.wantTool)
 			}
 		})

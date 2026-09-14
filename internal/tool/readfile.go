@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
@@ -30,19 +31,19 @@ type ReadFileInput struct {
 
 // ReadFileTool 是 read_file 工具的 ITool 实现，方法体直接委托给同包的
 // ReadFileDefinition/ReadFile 自由函数，不重复业务逻辑。
-type ReadFileTool struct{}
+type ReadFileTool struct{ Ignore []string }
 
 func (ReadFileTool) Definition() schema.ToolDefinition { return ReadFileDefinition() }
 
-func (ReadFileTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
-	return ReadFile(ctx, repoRoot, args)
+func (t ReadFileTool) Execute(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+	return ReadFile(ctx, repoRoot, args, t.Ignore...)
 }
 
 // ReadFileDefinition 返回 read_file 工具向模型公开的元信息。
 func ReadFileDefinition() schema.ToolDefinition {
 	return schema.ToolDefinition{
 		Name:        "read_file",
-		Description: "Read a file within the repository. Provide a repo-relative path. Optionally restrict to a 1-based inclusive line range via start_line/end_line; omit both to read the whole file (subject to a size cap).",
+		Description: "Read a file within the repository. Files excluded by configured ignore rules cannot be read, including through symlinks. Provide a repo-relative path. Optionally restrict to a 1-based inclusive line range via start_line/end_line; omit both to read the whole file (subject to a size cap).",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -67,7 +68,7 @@ func ReadFileDefinition() schema.ToolDefinition {
 // ReadFile 执行一次 read_file 工具调用，repoRoot 必须是已解析好的绝对路径。
 // 返回的 Result.IsError 为 true 时 Output 是可读的错误说明，
 // 供模型据此自我纠正（如换一个路径重试），而不是让整个审查流程崩溃。
-func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result {
+func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage, rules ...string) Result {
 	var input ReadFileInput
 	if err := json.Unmarshal(args, &input); err != nil {
 		return Result{Output: fmt.Sprintf("read_file 的参数不是合法的 JSON（%v）。请用类似 {\"path\": \"relative/path.go\"} 的 JSON 对象重新调用 read_file。", err), IsError: true}
@@ -76,6 +77,10 @@ func ReadFile(ctx context.Context, repoRoot string, args json.RawMessage) Result
 	resolved, err := resolveWithinRoot(repoRoot, input.Path)
 	if err != nil {
 		return Result{Output: err.Error(), IsError: true}
+	}
+
+	if ignore.Excluded(rules, repoRoot, input.Path) {
+		return Result{Output: "read_file：该文件被配置中的 ignore 规则排除。请改为读取未被忽略的文件。", IsError: true}
 	}
 
 	info, err := os.Stat(resolved)

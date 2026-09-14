@@ -15,6 +15,7 @@ import (
 	"github.com/qizhaoTan/Reviewer-AI/internal/config"
 	"github.com/qizhaoTan/Reviewer-AI/internal/engine"
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 	"github.com/qizhaoTan/Reviewer-AI/internal/log"
 	"github.com/qizhaoTan/Reviewer-AI/internal/provider"
 	"github.com/qizhaoTan/Reviewer-AI/internal/review"
@@ -141,7 +142,7 @@ func runReview(args []string) {
 			fail("resolve default config path: %v", err)
 		}
 	}
-	cfgFile, err := config.Load(path)
+	cfgFile, err := config.LoadMerged(path, ".")
 	if err != nil {
 		fail("load config: %v", err)
 	}
@@ -157,7 +158,7 @@ func runReview(args []string) {
 		if err := checkBaseReviewable(ctx, repoAbs, *baseRev); err != nil {
 			fail("%v", err)
 		}
-		changes, err = gitdiff.LoadDiffRange(ctx, repoAbs, *baseRev)
+		changes, err = gitdiff.LoadDiffRange(ctx, repoAbs, *baseRev, cfgFile.Ignore...)
 		if err != nil {
 			fail("load changes against %s: %v", *baseRev, err)
 		}
@@ -171,7 +172,7 @@ func runReview(args []string) {
 				fail("auto-stage changes: %v", err)
 			}
 		}
-		changes, err = gitdiff.LoadStaged(ctx, repoAbs)
+		changes, err = gitdiff.LoadStaged(ctx, repoAbs, cfgFile.Ignore...)
 		if err != nil {
 			fail("load staged changes: %v", err)
 		}
@@ -192,7 +193,7 @@ func runReview(args []string) {
 	}
 	defer db.Close()
 
-	deps, err := buildDeps(cfgFile, modelCfg, changes, anchorFileReader(ctx, repoAbs))
+	deps, err := buildDeps(cfgFile, modelCfg, changes, anchorFileReader(ctx, repoAbs, cfgFile.Ignore...))
 	if err != nil {
 		fail("%v", err)
 	}
@@ -221,7 +222,7 @@ func runReview(args []string) {
 //
 // 拿不到状态时返回 nil（整体关闭二级定位）而不是让审查失败：定位是锦上添花，
 // 不该因为它把整次审查搞挂。
-func anchorFileReader(ctx context.Context, repoAbs string) review.FileReader {
+func anchorFileReader(ctx context.Context, repoAbs string, rules ...string) review.FileReader {
 	modified, err := gitdiff.WorkTreeModifiedPaths(ctx, repoAbs)
 	if err != nil {
 		return nil
@@ -232,6 +233,9 @@ func anchorFileReader(ctx context.Context, repoAbs string) review.FileReader {
 	}
 
 	return func(path string) ([]byte, bool) {
+		if ignore.Excluded(rules, repoAbs, path) {
+			return nil, false
+		}
 		if _, dirty := skip[path]; dirty {
 			return nil, false
 		}
@@ -311,11 +315,11 @@ func fail(format string, args ...any) {
 // readOnlyTools 是三个阶段（初审 / 复核 / reply）共用的只读工具。
 // 每次都新建一份切片而不是共享一个包级变量：调用方会往返回值上 append
 // 各自的收尾工具，共享底层数组会让两次 append 互相覆盖。
-func readOnlyTools() []tool.ITool {
+func readOnlyTools(rules ...string) []tool.ITool {
 	return []tool.ITool{
-		tool.ReadFileTool{},
-		tool.GlobTool{},
-		tool.GrepTool{},
+		tool.ReadFileTool{Ignore: rules},
+		tool.GlobTool{Ignore: rules},
+		tool.GrepTool{Ignore: rules},
 	}
 }
 
@@ -330,9 +334,10 @@ func buildDeps(cfgFile *config.File, modelCfg config.ModelConfig, changes []gitd
 		return engine.Deps{}, fmt.Errorf("create provider: %w", err)
 	}
 	return engine.Deps{
+		Ignore:              cfgFile.Ignore,
 		LLM:                 llm,
-		Tools:               append(readOnlyTools(), tool.SubmitReviewTool{Changes: changes, ReadFile: readFile}),
-		CritiqueTools:       append(readOnlyTools(), tool.CritiqueVerdictTool{}),
+		Tools:               append(readOnlyTools(cfgFile.Ignore...), tool.SubmitReviewTool{Changes: changes, ReadFile: readFile}),
+		CritiqueTools:       append(readOnlyTools(cfgFile.Ignore...), tool.CritiqueVerdictTool{}),
 		CritiqueConcurrency: cfgFile.Critique.ConcurrencyOrDefault(),
 		CritiqueMaxTurns:    cfgFile.Critique.MaxTurnsOrDefault(),
 		LanguagePrompt:      cfgFile.LanguagePromptOrDefault(),
@@ -354,7 +359,7 @@ func buildInteractive(configPath string) (*engine.Interactive, error) {
 			return nil, fmt.Errorf("resolve default config path: %w", err)
 		}
 	}
-	cfgFile, err := config.Load(path)
+	cfgFile, err := config.LoadMerged(path, ".")
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
@@ -372,7 +377,7 @@ func buildInteractive(configPath string) (*engine.Interactive, error) {
 	}
 	return &engine.Interactive{
 		Deps:       deps,
-		ReplyTools: append(readOnlyTools(), tool.WithdrawFindingTool{}),
+		ReplyTools: append(readOnlyTools(cfgFile.Ignore...), tool.WithdrawFindingTool{}),
 		Timeout:    modelCfg.Timeout(),
 		AutoStage:  cfgFile.AutoStage,
 	}, nil

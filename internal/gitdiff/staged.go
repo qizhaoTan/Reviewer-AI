@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/qizhaoTan/Reviewer-AI/internal/ignore"
 )
 
 // Change is one file-level change frozen in the Git index.
@@ -20,7 +22,7 @@ type Change struct {
 
 // LoadStaged returns file-level patches from the Git index relative to HEAD.
 // Working-tree-only changes are deliberately excluded.
-func LoadStaged(ctx context.Context, repoDir string) ([]Change, error) {
+func LoadStaged(ctx context.Context, repoDir string, rules ...string) ([]Change, error) {
 	entries, err := git(ctx, repoDir, "diff", "--cached", "--name-status", "-z", "--no-renames", "--")
 	if err != nil {
 		return nil, fmt.Errorf("list staged changes: %w", err)
@@ -38,6 +40,9 @@ func LoadStaged(ctx context.Context, repoDir string) ([]Change, error) {
 	for i := 0; i < len(fields); i += 2 {
 		status := string(fields[i])
 		path := string(fields[i+1])
+		if ignore.Match(rules, path) {
+			continue
+		}
 		patch, err := git(ctx, repoDir,
 			"diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3", "--", path,
 		)

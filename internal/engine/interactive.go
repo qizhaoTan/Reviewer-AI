@@ -8,6 +8,7 @@ import (
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/gitdiff"
 	"github.com/qizhaoTan/Reviewer-AI/internal/log"
+	"github.com/qizhaoTan/Reviewer-AI/internal/prompt"
 	"github.com/qizhaoTan/Reviewer-AI/internal/review"
 	"github.com/qizhaoTan/Reviewer-AI/internal/store"
 	"github.com/qizhaoTan/Reviewer-AI/internal/tool"
@@ -64,6 +65,9 @@ func (i *Interactive) Reply(ctx context.Context, runID, findingID, userReply str
 		return nil, fmt.Errorf("run %s does not exist", runID)
 	}
 
+	if !prompt.MatchesIgnorePolicy(run.Messages, i.Deps.Ignore) {
+		return nil, fmt.Errorf("ignore rules have changed; start a new review before discussing this finding")
+	}
 	idx := indexOfFinding(run.Findings, findingID)
 	if idx < 0 {
 		return nil, fmt.Errorf("run %s has no finding %s", runID, findingID)
@@ -253,14 +257,14 @@ func (i *Interactive) loadDiffRange(ctx context.Context, repoDir, baseRev string
 	if i.LoadDiffRange != nil {
 		return i.LoadDiffRange(ctx, repoDir, baseRev)
 	}
-	return gitdiff.LoadDiffRange(ctx, repoDir, baseRev)
+	return gitdiff.LoadDiffRange(ctx, repoDir, baseRev, i.Deps.Ignore...)
 }
 
 func (i *Interactive) loadStaged(ctx context.Context, repoDir string) ([]gitdiff.Change, error) {
 	if i.LoadStaged != nil {
 		return i.LoadStaged(ctx, repoDir)
 	}
-	return gitdiff.LoadStaged(ctx, repoDir)
+	return gitdiff.LoadStaged(ctx, repoDir, i.Deps.Ignore...)
 }
 
 func (i *Interactive) stageAll(ctx context.Context, repoDir string) error {

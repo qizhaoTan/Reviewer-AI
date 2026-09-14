@@ -14,9 +14,11 @@ Reviewer-AI 是一个用大语言模型审查 Git 变更的 Go 命令行工具�
 
 - `internal/gitdiff` —— 采集变更、`StageAll`、`CurrentBranch`。两条采集路径：`LoadStaged`（暂存区）与 `LoadDiffRange`（`base...HEAD`，配套 `ResolveRevision` / `WorkTreeDirtyPaths` / `MergeConflicts` 三个前置校验）。保持确定性，不要引入大模型逻辑。
 - `internal/schema` —— `Message`/`ToolCall`/`ToolDefinition` 类型定义，是大模型层与其他一切的契约。
-- `internal/config` —— 加载 `~/.reviewer/config.json`（`-config` 参数或 `$REVIEWER_AI_CONFIG` 可覆盖路径），把 `roles.primary` 对照 `models` map 解析成 provider 配置。
+- `internal/config` —— 先加载 `~/.reviewer/config.json`（`-config` 参数或 `$REVIEWER_AI_CONFIG` 可覆盖此路径），再用启动时当前目录的 `.reviewer/config.json` 递归覆盖字段（数组整体替换），把 `roles.primary` 对照 `models` map 解析成 provider 配置。
 - `internal/store` —— SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）持久化运行记录，默认 `~/.reviewer/runs.db`。
 - `internal/log` —— 基于 `log/slog` 的结构化日志，让工具调用过程可观测。
+
+- `internal/ignore` —— 共享的 `ignore` glob 规则校验与匹配，统一用于两种 Git diff 和全部只读文件工具，`no_ignore` 不绕过配置排除。
 
 **大模型层**
 

@@ -38,9 +38,12 @@ const (
 
 // Deps 是 Run 所需的外部依赖，由调用方组装好后传入。
 type Deps struct {
-	LLM   schema.IProvider
-	Store *store.Store
-	Tools []tool.ITool
+	// Ignore is the policy used by the file tools and snapshot loader. It also
+	// prevents reuse of model context collected under a different policy.
+	Ignore []string
+	LLM    schema.IProvider
+	Store  *store.Store
+	Tools  []tool.ITool
 
 	// CritiqueTools 是复核阶段可用的工具：只读工具加上 submit_verdict。
 	// 与 Tools 分开是因为两个阶段的收尾工具不同——复核者不该看到
@@ -85,7 +88,7 @@ type Deps struct {
 func Run(ctx context.Context, deps Deps, repoAbs, branch, baseRev string, changes []gitdiff.Change, timeout time.Duration) (*store.Run, error) {
 	runKey := buildRunKey(repoAbs, branch, baseRev)
 
-	run, err := resumeOrStartRun(ctx, deps.Store, runKey, baseRev, changes, deps.LanguagePrompt, deps.Fresh)
+	run, err := resumeOrStartRun(ctx, deps.Store, runKey, baseRev, changes, deps.LanguagePrompt, deps.Fresh, deps.Ignore...)
 	if err != nil {
 		return nil, fmt.Errorf("resume or start run: %w", err)
 	}
@@ -318,11 +321,14 @@ const baseKeySuffix = "#base="
 // 这类场景——旧记录不会因为不是最新就被忽略，只要内容相同就能找到。
 //
 // fresh 为 true 时跳过上面整套匹配，无条件新建一条记录，见 Deps.Fresh。
-func resumeOrStartRun(ctx context.Context, db *store.Store, runKey, baseRev string, changes []gitdiff.Change, languagePrompt string, fresh bool) (*store.Run, error) {
+func resumeOrStartRun(ctx context.Context, db *store.Store, runKey, baseRev string, changes []gitdiff.Change, languagePrompt string, fresh bool, rules ...string) (*store.Run, error) {
 	hash := gitdiff.SnapshotHash(changes)
 	matched, err := db.LoadRunByHash(ctx, runKey, hash)
 	if err != nil {
 		return nil, fmt.Errorf("load run by hash: %w", err)
+	}
+	if matched != nil && !prompt.MatchesIgnorePolicy(matched.Messages, rules) {
+		matched = nil
 	}
 	if fresh && matched != nil {
 		log.Info("已指定 fresh，忽略可复用的历史记录，重新开始审查", "ignoredRunID", matched.ID, "ignoredStatus", matched.Status)
@@ -344,7 +350,7 @@ func resumeOrStartRun(ctx context.Context, db *store.Store, runKey, baseRev stri
 		RepoPath: runKey,
 		Status:   store.StatusInProgress,
 		Snapshot: changes,
-		Messages: prompt.BuildInitial(changes, languagePrompt),
+		Messages: prompt.BuildInitial(changes, languagePrompt, rules...),
 		BaseRev:  baseRev,
 	}
 	if err := db.SaveRun(ctx, *run); err != nil {
