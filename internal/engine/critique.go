@@ -112,7 +112,9 @@ func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, chan
 	for i := range out.Findings {
 		g.Go(func() error {
 			f := out.Findings[i]
-			verdict, err := critiqueOne(gctx, deps, f, patchByPath[f.File])
+			verdict, msgs, err := critiqueOne(gctx, deps, f, patchByPath[f.File])
+			// 成功与否都把过程记下来：复核凭什么下这个结论，只有这段能回答。
+			out.Findings[i].CritiqueMessages = msgs
 			if err != nil {
 				// 基础设施问题：上抛以中断整体，让这次复核有机会重跑。
 				// errgroup 会连带取消其余仍在跑的复核。
@@ -141,13 +143,22 @@ func Critique(ctx context.Context, deps CritiqueDeps, report review.Report, chan
 }
 
 // critiqueOne 对单条意见跑一个独立的 tool loop，直到复核者调用 submit_verdict。
-func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch string) (tool.Verdict, error) {
+//
+// 第二个返回值是这一轮产生的消息（复核者的发言、工具调用往返），供调用方存进
+// Finding.CritiqueMessages。它不含 buildCritiqueMessages 拼出的 system prompt 和
+// 意见复述——那两段每次都能重新拼出来，与 Reply 的 Messages 同一口径。
+//
+// 出错时同样把已产生的消息带出来：超轮数那种情况恰恰最需要看复核者在干什么，
+// 只返回一个"超过轮数上限"却把过程丢掉，等于把最该排查的那次跑成了黑盒。
+func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch string) (tool.Verdict, []schema.Message, error) {
 	maxTurns := deps.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = fallbackCritiqueMaxTurns
 	}
 
 	msgs := buildCritiqueMessages(f, patch, deps.LanguagePrompt)
+	// 前置上下文不进 fresh，所以记下它的长度作为分界点。
+	prefix := len(msgs)
 	toolDefinitions := make([]schema.ToolDefinition, len(deps.Tools))
 	for i, t := range deps.Tools {
 		toolDefinitions[i] = t.Definition()
@@ -157,7 +168,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 		resp, err := deps.LLM.Generate(ctx, msgs, toolDefinitions)
 		if err != nil {
 			// 标记为可恢复：调用方据此中断整体而不是把它写成"复核未能完成"。
-			return tool.Verdict{}, recoverable(fmt.Errorf("generate verdict: %w", err))
+			return tool.Verdict{}, msgs[prefix:], recoverable(fmt.Errorf("generate verdict: %w", err))
 		}
 		msgs = append(msgs, *resp)
 
@@ -181,7 +192,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 				result = t.Execute(ctx, deps.RepoRoot, tc.Arguments)
 			}
 			if result.CritiqueVerdict != nil {
-				return *result.CritiqueVerdict, nil
+				return *result.CritiqueVerdict, msgs[prefix:], nil
 			}
 			msgs = append(msgs, schema.Message{
 				Role:       schema.RoleUser,
@@ -191,7 +202,7 @@ func critiqueOne(ctx context.Context, deps CritiqueDeps, f review.Finding, patch
 		}
 	}
 
-	return tool.Verdict{}, fmt.Errorf("超过复核轮数上限（%d）仍未调用 %s", maxTurns, tool.CritiqueVerdictName)
+	return tool.Verdict{}, msgs[prefix:], fmt.Errorf("超过复核轮数上限（%d）仍未调用 %s", maxTurns, tool.CritiqueVerdictName)
 }
 
 // critiqueSystemPrompt 定义复核者的角色。措辞的重点是压住"复核者倾向于附和

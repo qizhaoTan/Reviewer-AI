@@ -1244,3 +1244,95 @@ func TestIndexRendersDeleteAllControl(t *testing.T) {
 		})
 	}
 }
+
+// TestRunPageRendersCritiqueProcess 断言复核过程渲染到了页面上。
+//
+// 这是加 CritiqueMessages 的全部目的：复核理由只是一句自述，值不值得信取决于
+// 复核者到底去读了代码还是原地想了想，而那只有这段记录能回答。
+func TestRunPageRendersCritiqueProcess(t *testing.T) {
+	critiqued := []schema.Message{
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{
+			{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)},
+		}},
+		{Role: schema.RoleUser, ToolCallID: "c1", Content: "func Load() error { return nil }"},
+		{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{
+			{ID: "c2", Name: "submit_verdict", Arguments: json.RawMessage(`{"keep":false,"reason":"读过之后不成立"}`)},
+		}},
+	}
+
+	tests := []struct {
+		name    string
+		finding review.Finding
+		// wantSection 表示该条意见下应当出现「复核过程」折叠框。
+		wantSection bool
+		// wantContains 是展开后应当能找到的内容片段。
+		wantContains []string
+	}{
+		{
+			name: "a critiqued finding shows what the critic actually did",
+			finding: review.Finding{
+				ID: "f1", File: "a.go", Severity: review.SeverityWarning, Summary: "有过程",
+				Kept: false, CritiqueReason: "读过之后不成立", CritiqueMessages: critiqued,
+			},
+			wantSection:  true,
+			wantContains: []string{"复核过程", "read_file", "submit_verdict", "func Load() error"},
+		},
+		{
+			name: "a finding with no recorded critique renders no empty toggle",
+			finding: review.Finding{
+				ID: "f1", File: "a.go", Severity: review.SeverityWarning, Summary: "没过程",
+				Kept: true, CritiqueReason: "成立",
+			},
+			wantSection: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := fakeSource{runs: []store.Run{{ID: "x", Critiqued: true, Findings: []review.Finding{tt.finding}}}}
+			body := get(t, src, "/run?id=x").Body.String()
+
+			if got := strings.Contains(body, `<details class="fcritique">`); got != tt.wantSection {
+				t.Errorf("存在复核过程折叠框 = %v, want %v", got, tt.wantSection)
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(body, want) {
+					t.Errorf("页面缺少复核过程的内容 %q\nbody: %s", want, body)
+				}
+			}
+		})
+	}
+}
+
+// TestCritiqueProcessIsEscaped 断言复核消息同样走 HTML 转义。
+//
+// 这段内容来自模型和 read_file 读到的仓库文件，两者都可能含尖括号。单独测一条
+// 是因为它是新加的渲染路径：既有的转义测试覆盖不到它，而漏一处转义就是一个
+// 存量文件内容直接变成页面标签的注入口。
+func TestCritiqueProcessIsEscaped(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantRaw string
+	}{
+		{name: "script tag in a tool result", content: `<script>alert(1)</script>`, wantRaw: `<script>alert(1)</script>`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := review.Finding{
+				ID: "f1", File: "a.go", Severity: review.SeverityInfo, Summary: "s", Kept: true,
+				CritiqueMessages: []schema.Message{{Role: schema.RoleUser, ToolCallID: "c1", Content: tt.content}},
+			}
+			src := fakeSource{runs: []store.Run{{ID: "x", Critiqued: true, Findings: []review.Finding{f}}}}
+			body := get(t, src, "/run?id=x").Body.String()
+
+			if strings.Contains(body, tt.wantRaw) {
+				t.Errorf("复核消息里的 %q 未被转义就输出到了页面", tt.wantRaw)
+			}
+			if !strings.Contains(body, "&lt;script&gt;") {
+				t.Errorf("期望看到转义后的形式\nbody: %s", body)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -619,6 +620,24 @@ func TestSaveFindingsRoundTrip(t *testing.T) {
 			wantStat: []review.FindingStatus{"", review.StatusWithdrawn},
 		},
 		{
+			// 复核过程走的是同一列 JSON，但它带工具调用往返（Discussion 那条
+			// 用例只有纯文本），单独覆盖一次：ToolCalls 的 Arguments 是
+			// json.RawMessage，序列化上最容易出岔子的就是它。
+			name:    "the critique trail survives a round trip",
+			initial: []review.Finding{{ID: "f1", File: "a.go"}},
+			updated: []review.Finding{
+				{ID: "f1", File: "a.go", Kept: false, CritiqueReason: "读过之后不成立",
+					CritiqueMessages: []schema.Message{
+						{Role: schema.RoleAssistant, ToolCalls: []schema.ToolCall{
+							{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)},
+						}},
+						{Role: schema.RoleUser, ToolCallID: "c1", Content: "func Load() error { return nil }"},
+					}},
+			},
+			wantIDs:  []string{"f1"},
+			wantStat: []review.FindingStatus{""},
+		},
+		{
 			name:     "an empty list is stored as an empty array not null",
 			initial:  []review.Finding{{ID: "f1", File: "a.go"}},
 			updated:  nil,
@@ -658,11 +677,19 @@ func TestSaveFindingsRoundTrip(t *testing.T) {
 					t.Errorf("Findings[%d].Status = %q, want %q", i, got.Findings[i].Status, tt.wantStat[i])
 				}
 			}
-			// 讨论记录必须完整读回——它是判断撤回可不可信的依据。
+			// 讨论记录与复核过程都必须完整读回——它们分别是判断撤回和判断
+			// 裁决可不可信的依据，少读回一条就等于那个判断没了依据。
 			for _, f := range got.Findings {
 				for _, want := range tt.updated {
-					if f.ID == want.ID && !reflect.DeepEqual(f.Discussion, want.Discussion) {
+					if f.ID != want.ID {
+						continue
+					}
+					if !reflect.DeepEqual(f.Discussion, want.Discussion) {
 						t.Errorf("Findings[%s].Discussion = %+v, want %+v", f.ID, f.Discussion, want.Discussion)
+					}
+					if !reflect.DeepEqual(f.CritiqueMessages, want.CritiqueMessages) {
+						t.Errorf("Findings[%s].CritiqueMessages = %+v, want %+v",
+							f.ID, f.CritiqueMessages, want.CritiqueMessages)
 					}
 				}
 			}

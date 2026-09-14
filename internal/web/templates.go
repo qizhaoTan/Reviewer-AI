@@ -233,6 +233,38 @@ const runHTML = `{{define "findings"}}
           </details>
         {{end}}
 
+        {{/* 复核过程默认折叠：一句"复核理由"是结论，这里是它凭什么下这个
+             结论——复核者读了哪些文件、grep 了什么、看到了什么。只有在怀疑
+             某条裁决时才需要翻开，所以不占默认视野。 */}}
+        {{if .CritiqueMessages}}
+          <details class="fcritique">
+            <summary>复核过程（{{len .CritiqueMessages}} 条消息）</summary>
+            <div class="dbody">
+              {{range .CritiqueMessages}}
+                {{/* 与消息历史同一套渲染：角色徽标 + 工具名常显，正文点开才看。
+                     复核里 read_file 的结果可能是整个文件，全量铺开会把这条
+                     意见淹掉。 */}}
+                <details class="msg">
+                  <summary>
+                    <span class="role role-{{.Role}}">{{.Role}}</span>
+                    {{if .ToolCallID}}<span class="tag">tool_call_id: {{.ToolCallID}}</span>{{end}}
+                    {{range .ToolCalls}}<span class="tag tool">{{.Name}}</span>{{end}}
+                    <span class="peek">{{peek .Content}}</span>
+                  </summary>
+                  <div class="mcontent">
+                    {{if .Content}}<div class="mbody"><pre>{{.Content}}</pre></div>{{end}}
+                    {{if .ReasoningContent}}<div class="reasoning"><pre>{{.ReasoningContent}}</pre></div>{{end}}
+                    {{range .ToolCalls}}
+                      <div class="toolcall"><pre>{{.Name}}  [id={{.ID}}]
+{{printf "%s" .Arguments}}</pre></div>
+                    {{end}}
+                  </div>
+                </details>
+              {{end}}
+            </div>
+          </details>
+        {{end}}
+
         {{/* 讨论记录默认展开：用户提过异议的意见，那段往复正是他下次回来
              要看的东西，藏起来等于白讨论一场。 */}}
         {{if .Discussion}}
@@ -308,9 +340,10 @@ const runHTML = `{{define "findings"}}
                    border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
   .freply button:hover { background: #e4ecff; }
 
-  .fdiscuss { margin-top: 10px; }
-  .fdiscuss > summary { cursor: pointer; font-size: 12px; color: #8a9099; padding: 2px 0; }
-  .fdiscuss .dbody { margin-top: 8px; }
+  .fdiscuss, .fcritique { margin-top: 10px; }
+  .fdiscuss > summary, .fcritique > summary { cursor: pointer; font-size: 12px; color: #8a9099; padding: 2px 0; }
+  .fdiscuss > summary:hover, .fcritique > summary:hover { color: #3370ff; }
+  .fdiscuss .dbody, .fcritique .dbody { margin-top: 8px; }
   .dmsg { background: #fafbfc; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .dmsg pre { margin-top: 6px; }
   .none { color: #b0b5bb; font-size: 14px; }

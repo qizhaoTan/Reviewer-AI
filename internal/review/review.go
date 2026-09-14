@@ -95,6 +95,17 @@ type Finding struct {
 	// CritiqueReason 是复核给出的保留/丢弃理由，复核未执行时为空。
 	CritiqueReason string `json:"critique_reason,omitempty"`
 
+	// CritiqueMessages 是这条意见那一轮复核里产生的消息：复核者的发言、它
+	// 调用了哪些只读工具、工具返回了什么。不含 system prompt 和那段复述意见
+	// 的上下文——那两段每次都能重新拼出来，与 Discussion 同一口径。
+	//
+	// 存这段而不是只存 CritiqueReason，是因为一句自述恰恰是最不可信的那部分：
+	// 复核值不值得信，取决于它到底去读了代码还是原地想了想。没有这段记录，
+	// "复核砍掉了什么、为什么砍"就只能听模型的一面之词。
+	//
+	// 复核未执行、或者那一轮一条消息都没产生时为 nil。
+	CritiqueMessages []schema.Message `json:"critique_messages,omitempty"`
+
 	// Status 是这条意见在用户交互中的状态。零值（空串）等同于 StatusOpen——
 	// 阶段四之前落盘的记录读出来就是空串，不该因为多了一个字段就全变成
 	// "状态未知"。取值判断一律走 Status.IsWithdrawn / Report.ActiveFindings，

@@ -482,3 +482,148 @@ func TestCritiqueSystemPromptPushesBack(t *testing.T) {
 		})
 	}
 }
+
+// TestCritiqueRecordsMessages 断言复核过程被记下来了。
+//
+// 单独一个测试而不是并进 TestCritique：那个表关心的是裁决结果，这个关心的是
+// 过程留痕，两件事的失败原因完全不同——裁决对了但过程没存下来，Web 上就只剩
+// 一句模型自述，而这恰恰是加这个字段要解决的问题。
+func TestCritiqueRecordsMessages(t *testing.T) {
+	tests := []struct {
+		name     string
+		findings []review.Finding
+		turns    int
+		maxTurns int
+		// wantMinMessages 是每条意见至少应有的消息数。用下限而不是精确值：
+		// 消息条数取决于 provider 桩的轮次编排，钉死会让以后调整桩变成改测试。
+		wantMinMessages int
+		// wantToolCall 表示消息里应当出现工具调用的记录。
+		wantToolCall bool
+		// wantVerdictCall 表示收尾的 submit_verdict 调用本身也该留痕。
+		wantVerdictCall bool
+	}{
+		{
+			name:            "a straight verdict still records the call that produced it",
+			findings:        findingsNamed("a"),
+			wantMinMessages: 1,
+			wantVerdictCall: true,
+		},
+		{
+			name:            "tool investigation is recorded, not just the conclusion",
+			findings:        findingsNamed("needs digging"),
+			turns:           3,
+			wantMinMessages: 7, // 3 轮 (assistant + tool result) + 最后的裁决消息
+			wantToolCall:    true,
+			wantVerdictCall: true,
+		},
+		{
+			// 复核者一直不表态时最需要看它在干什么，所以这条路径也必须留痕。
+			name:            "a critic that never submits a verdict still leaves its trail",
+			findings:        findingsNamed("stalls"),
+			turns:           critiqueTestMaxTurns + 1,
+			maxTurns:        critiqueTestMaxTurns,
+			wantMinMessages: critiqueTestMaxTurns * 2,
+			wantToolCall:    true,
+		},
+		{
+			name:            "every finding gets its own trail",
+			findings:        findingsNamed("a", "b", "c"),
+			wantMinMessages: 1,
+			wantVerdictCall: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &verdictProvider{turnsBeforeVerdict: tt.turns}
+			deps := CritiqueDeps{
+				LLM:         llm,
+				Tools:       critiqueTestTools(),
+				RepoRoot:    t.TempDir(),
+				Concurrency: 4,
+				MaxTurns:    tt.maxTurns,
+			}
+
+			got, err := Critique(context.Background(), deps,
+				review.Report{Summary: "initial", Findings: tt.findings}, critiqueTestChanges())
+			if err != nil {
+				t.Fatalf("Critique() error = %v", err)
+			}
+
+			for i, f := range got.Findings {
+				if len(f.CritiqueMessages) < tt.wantMinMessages {
+					t.Errorf("Findings[%d] (%s) 有 %d 条复核消息, want >= %d",
+						i, f.Summary, len(f.CritiqueMessages), tt.wantMinMessages)
+				}
+				// 前置上下文不该混进来：system prompt 和意见复述每次都能重新
+				// 拼出来，存进去只会让库随意见条数成倍变大。
+				for j, m := range f.CritiqueMessages {
+					if m.Role == schema.RoleSystem {
+						t.Errorf("Findings[%d].CritiqueMessages[%d] 是 system 消息；前置上下文不该落盘", i, j)
+					}
+				}
+				if tt.wantToolCall && !hasToolCallNamed(f.CritiqueMessages, "glob") {
+					t.Errorf("Findings[%d] 的复核消息里没有 glob 调用；"+
+						"看不到复核者查证了什么，就没法判断它的裁决可不可信", i)
+				}
+				if tt.wantVerdictCall && !hasToolCallNamed(f.CritiqueMessages, tool.CritiqueVerdictName) {
+					t.Errorf("Findings[%d] 的复核消息里没有 %s 调用", i, tool.CritiqueVerdictName)
+				}
+			}
+		})
+	}
+}
+
+// TestCritiqueMessagesAreIndependentPerFinding 断言各条意见的复核记录互不串台。
+//
+// 复核是并发跑的，每条一个独立对话。如果实现里不小心共享了底层数组或 map，
+// 表现会是"某条意见的页面上显示着另一条意见的查证过程"——一种极难察觉、
+// 又会彻底误导排查的错误。
+func TestCritiqueMessagesAreIndependentPerFinding(t *testing.T) {
+	tests := []struct {
+		name     string
+		findings []review.Finding
+	}{
+		{name: "three findings investigated concurrently", findings: findingsNamed("alpha", "beta", "gamma")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := CritiqueDeps{
+				LLM:         &verdictProvider{turnsBeforeVerdict: 2},
+				Tools:       critiqueTestTools(),
+				RepoRoot:    t.TempDir(),
+				Concurrency: len(tt.findings),
+			}
+
+			got, err := Critique(context.Background(), deps,
+				review.Report{Summary: "initial", Findings: tt.findings}, critiqueTestChanges())
+			if err != nil {
+				t.Fatalf("Critique() error = %v", err)
+			}
+
+			seen := map[*schema.Message]int{}
+			for i, f := range got.Findings {
+				if len(f.CritiqueMessages) == 0 {
+					t.Fatalf("Findings[%d] 没有复核消息", i)
+				}
+				if prev, ok := seen[&f.CritiqueMessages[0]]; ok {
+					t.Errorf("Findings[%d] 与 Findings[%d] 共用同一段复核消息", i, prev)
+				}
+				seen[&f.CritiqueMessages[0]] = i
+			}
+		})
+	}
+}
+
+// hasToolCallNamed 报告消息里是否出现过名为 name 的工具调用。
+func hasToolCallNamed(msgs []schema.Message, name string) bool {
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			if tc.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
