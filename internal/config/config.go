@@ -19,13 +19,14 @@ const defaultTimeout = 120 * time.Second
 // 字段是 provider.Config 的超集：context_window 目前尚无消费方，
 // 仅解析保留（encoding/json 对未知字段本就会忽略，留着无害，方便未来接入上下文预算控制）。
 type ModelConfig struct {
-	Provider       string `json:"provider"`
-	APIKey         string `json:"api_key"`
-	BaseURL        string `json:"base_url"`
-	Model          string `json:"model"`
-	ContextWindow  int64  `json:"context_window"`
-	MaxTokens      int64  `json:"max_tokens"`
-	TimeoutSeconds int64  `json:"timeout_seconds"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Provider        string `json:"provider"`
+	APIKey          string `json:"api_key"`
+	BaseURL         string `json:"base_url"`
+	Model           string `json:"model"`
+	ContextWindow   int64  `json:"context_window"`
+	MaxTokens       int64  `json:"max_tokens"`
+	TimeoutSeconds  int64  `json:"timeout_seconds"`
 }
 
 // Timeout 返回该模型一次审查运行的总超时预算；未配置或非法值时兜底为 defaultTimeout。
@@ -39,11 +40,12 @@ func (m ModelConfig) Timeout() time.Duration {
 // ToProviderConfig 转换为 provider.New 所需的 provider.Config。
 func (m ModelConfig) ToProviderConfig() provider.Config {
 	return provider.Config{
-		Provider:  m.Provider,
-		APIKey:    m.APIKey,
-		BaseURL:   m.BaseURL,
-		Model:     m.Model,
-		MaxTokens: m.MaxTokens,
+		ReasoningEffort: m.ReasoningEffort,
+		Provider:        m.Provider,
+		APIKey:          m.APIKey,
+		BaseURL:         m.BaseURL,
+		Model:           m.Model,
+		MaxTokens:       m.MaxTokens,
 	}
 }
 

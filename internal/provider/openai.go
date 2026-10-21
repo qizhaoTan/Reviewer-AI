@@ -44,8 +44,9 @@ func splitReasoning(content, reasoningField string) (answer, reasoning string) {
 }
 
 type OpenAIProvider struct {
-	client openai.Client // 值类型，非指针
-	model  string
+	reasoningEffort string
+	client          openai.Client // 值类型，非指针
+	model           string
 }
 
 // NewOpenAIProvider 用显式参数构造，配置加载与校验由调用方（config 包）负责。
@@ -68,6 +69,9 @@ func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, av
 		Tools:             tools,
 		ToolChoice:        toolChoice,
 		ParallelToolCalls: openai.Bool(true), // 并行工具调用，对于该项目默认开启
+	}
+	if p.reasoningEffort != "" {
+		params.ReasoningEffort = shared.ReasoningEffort(p.reasoningEffort)
 	}
 
 	resp, err := p.client.Chat.Completions.New(ctx, params)

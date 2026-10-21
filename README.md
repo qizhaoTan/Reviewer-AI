@@ -142,12 +142,20 @@ $gobin = "$(go env GOPATH)\bin"
 | 字段 | 说明 |
 | --- | --- |
 | `models` | 一组具名模型配置。`provider` 只能是 `openai` 或 `anthropic`，决定用哪套协议说话。 |
+| `models.<别名>.reasoning_effort` | 可选的思考等级，按模型配置；未填写、`""` 或 `null` 均不发送等级参数，保持现有行为。 |
 | `roles.primary` | 当前生效的是 `models` 里的哪一个。 |
 | `critique.concurrency` | 复核阶段的并发数。 |
 | `critique.max_turns` | 单条意见复核时允许的最大工具调用轮数。 |
 | `ignore` | 可选的文件忽略 glob 数组，默认空。统一排除 Git diff、`read_file`、`glob`、`grep`，`no_ignore` 不会绕过这些规则。 |
 | `auto_stage` | 为 true 时审查前自动 `git add -A`。 |
 | `language_prompt` | 可选，覆盖默认的输出语言指令，整段照抄进 system prompt 末尾。不写时用默认值 `- Your response needs to be in Chinese!!!（你的回复必须使用中文）`；显式配成空字符串 `""` 表示不加任何语言约束，由模型自己决定语言。 |
+
+思考等级在对应模型条目中设置，例如 `"reasoning_effort": "high"`：
+
+- OpenAI：发送 `reasoning_effort`，允许 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。
+- Anthropic：发送 `output_config.effort`，允许 `low`、`medium`、`high`、`xhigh`、`max`。此项只设置 effort，不额外设置 `thinking` 开关或 `budget_tokens`；effort 在未开启 thinking 时也能控制回答投入。
+
+这些是协议允许的等级，具体模型或兼容服务可能只支持其中一部分；请按服务端支持范围配置，不支持时会返回 API 错误，不会静默降级。参考 [OpenAI 官方参数文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 和 [Anthropic effort 文档](https://platform.claude.com/docs/en/build-with-claude/effort)。初审、复核、追问和重审使用所选模型的等级。修改等级不会强制重跑已完成且内容相同的历史审查。
 
 运行时先读取全局配置，再读取**启动时当前目录**的 `.reviewer/config.json`。项目配置与全局配置格式相同，允许仅填写需要覆盖的字段。例如：
 

@@ -22,9 +22,10 @@ const DefaultAnthropicMaxTokens = 32000
 // 与 OpenAIProvider 对等：在内部 schema.Message 与 Anthropic SDK 类型之间双向翻译，
 // 并把思维链（thinking block）剥离到 ReasoningContent，绝不混入对外 Content。
 type AnthropicProvider struct {
-	client    anthropic.Client // 值类型，与 OpenAIProvider 保持一致
-	model     string
-	maxTokens int64
+	reasoningEffort string
+	client          anthropic.Client // 值类型，与 OpenAIProvider 保持一致
+	model           string
+	maxTokens       int64
 }
 
 // NewAnthropicProvider 用显式参数构造，配置加载与校验由调用方（config 包）负责。
@@ -57,6 +58,9 @@ func (p *AnthropicProvider) Generate(ctx context.Context, msgs []schema.Message,
 		ToolChoice: toolChoice,
 		MaxTokens:  p.maxTokens,
 		Messages:   anthropicMsgs,
+	}
+	if p.reasoningEffort != "" {
+		params.OutputConfig = anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(p.reasoningEffort)}
 	}
 
 	resp, err := p.client.Messages.New(ctx, params)

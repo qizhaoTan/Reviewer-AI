@@ -2,16 +2,19 @@ package provider
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/qizhaoTan/Reviewer-AI/internal/schema"
 )
 
 type Config struct {
-	Provider  string `json:"provider"` // Provider 选择大模型协议实现："openai"（默认）或 "anthropic"。留空按 "openai" 处理。
-	APIKey    string `json:"api_key"`
-	BaseURL   string `json:"base_url"` // BaseURL 兼容协议厂商的 BaseURL。
-	Model     string `json:"model"`
-	MaxTokens int64  `json:"max_tokens"` // MaxTokens 仅 Anthropic 模式使用（该协议必填）；<=0 时由 provider 兜底。OpenAI 模式忽略。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"` // Empty preserves the provider's existing defaults.
+	Provider        string `json:"provider"`                   // Provider 选择大模型协议实现："openai"（默认）或 "anthropic"。留空按 "openai" 处理。
+	APIKey          string `json:"api_key"`
+	BaseURL         string `json:"base_url"` // BaseURL 兼容协议厂商的 BaseURL。
+	Model           string `json:"model"`
+	MaxTokens       int64  `json:"max_tokens"` // MaxTokens 仅 Anthropic 模式使用（该协议必填）；<=0 时由 provider 兜底。OpenAI 模式忽略。
 }
 
 func (c Config) Validate() error {
@@ -28,6 +31,15 @@ func (c Config) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("缺少必填配置项: %v", missing)
 	}
+	if c.ReasoningEffort != "" {
+		levels := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+		if c.Provider == "anthropic" || c.Provider == "Anthropic" {
+			levels = []string{"low", "medium", "high", "xhigh", "max"}
+		}
+		if !slices.Contains(levels, c.ReasoningEffort) {
+			return fmt.Errorf("无效的 reasoning_effort %q (provider=%q): 请使用 %s，或留空以保持默认行为", c.ReasoningEffort, c.Provider, strings.Join(levels, ", "))
+		}
+	}
 	return nil
 }
 
@@ -39,9 +51,13 @@ func New(cfg Config) (schema.IProvider, error) {
 
 	switch cfg.Provider {
 	case "OpenAI", "openai", "":
-		return NewOpenAIProvider(cfg.APIKey, cfg.BaseURL, cfg.Model), nil
+		p := NewOpenAIProvider(cfg.APIKey, cfg.BaseURL, cfg.Model)
+		p.reasoningEffort = cfg.ReasoningEffort
+		return p, nil
 	case "Anthropic", "anthropic":
-		return NewAnthropicProvider(cfg.APIKey, cfg.BaseURL, cfg.Model, cfg.MaxTokens), nil
+		p := NewAnthropicProvider(cfg.APIKey, cfg.BaseURL, cfg.Model, cfg.MaxTokens)
+		p.reasoningEffort = cfg.ReasoningEffort
+		return p, nil
 	default:
 		return nil, fmt.Errorf("不支持的大模型 provider: %s", cfg.Provider)
 	}
